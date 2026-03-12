@@ -30,6 +30,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   ];
   static final NumberFormat _scientificNumberFormat =
       NumberFormat('0.#####E0');
+  static final NumberFormat _trackballNumberFormat =
+      NumberFormat('0.########E0');
 
   final Map<String, SplayTreeMap<int, double?>> _liveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
@@ -38,6 +40,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final DateFormat _localTimeMinutesFormat = DateFormat('HH:mm');
   final DateFormat _localTimeSecondsFormat = DateFormat('HH:mm:ss');
+  final DateFormat _trackballTimeFormat = DateFormat('HH:mm:ss');
 
   PlotQueryResponse? _response;
   Timer? _liveTimer;
@@ -796,11 +799,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             trackballBehavior: TrackballBehavior(
               enable: true,
               activationMode: ActivationMode.longPress,
-              tooltipSettings: const InteractiveTooltip(
-                enable: true,
-                format: 'point.x\npoint.y',
-                decimalPlaces: 4,
-              ),
+              tooltipSettings: const InteractiveTooltip(enable: false),
+              builder: _buildTrackballTooltip,
             ),
             onChartTouchInteractionDown: (_) => _beginChartInteraction(),
             onChartTouchInteractionMove: (_) => _beginChartInteraction(),
@@ -861,6 +861,61 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       rangePadding: ChartRangePadding.none,
       title: AxisTitle(text: trimmedTitle),
     );
+  }
+
+  Widget _buildTrackballTooltip(
+    BuildContext context,
+    TrackballDetails details,
+  ) {
+    final point = details.point;
+    final timeText = _formatTrackballTime(point?.x);
+    final valueText = _formatTrackballValue(point?.y);
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFF2B2B2B),
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: const <BoxShadow>[
+          BoxShadow(
+            color: Color(0x33000000),
+            blurRadius: 8,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: DefaultTextStyle(
+          style: Theme.of(context).textTheme.bodySmall!.copyWith(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+              ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(timeText),
+              const SizedBox(height: 2),
+              Text(valueText),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatTrackballTime(dynamic value) {
+    if (value is DateTime) {
+      return _trackballTimeFormat.format(value.toLocal());
+    }
+    return value?.toString() ?? '--:--:--';
+  }
+
+  String _formatTrackballValue(dynamic value) {
+    if (value is num && value.isFinite) {
+      return _trackballNumberFormat.format(value.toDouble());
+    }
+    return '--';
   }
 
   double _chartHeightFor(int chartCount) {
