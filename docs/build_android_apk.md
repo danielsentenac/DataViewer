@@ -33,11 +33,20 @@ Then build:
 ```bash
 cd flutter_app
 ../scripts/flutterw pub get
-../scripts/flutterw build apk --release
+../scripts/flutterw build apk --release \
+  --dart-define=DATAVIEWER_BASE_URL=http://your-tomcat-host:8081/dataviewer
 ```
 
 Expected output:
 
 - `flutter_app/build/app/outputs/flutter-apk/app-release.apk`
 
-If the app must target a different backend, adjust the base URL in `flutter_app/lib/core/providers.dart` before building.
+The backend URL is intentionally not hardcoded in the repository.
+`DATAVIEWER_BASE_URL` must be provided at build time, and can also be passed
+for local runs:
+
+```bash
+cd flutter_app
+../scripts/flutterw run \
+  --dart-define=DATAVIEWER_BASE_URL=http://your-tomcat-host:8081/dataviewer
+```

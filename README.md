@@ -36,6 +36,8 @@ The app stays intentionally simple:
 ## Build APK
 
 See [docs/build_android_apk.md](docs/build_android_apk.md).
+The backend URL is supplied at build/run time with
+`--dart-define=DATAVIEWER_BASE_URL=...`.
 
 ## Important integration rule
 

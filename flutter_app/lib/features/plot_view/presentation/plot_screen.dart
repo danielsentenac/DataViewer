@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 
 import 'package:dataviewer/features/plot_view/presentation/plot_view_providers.dart';
 import 'package:dataviewer/shared/models/plot_models.dart';
 import 'package:dataviewer/shared/models/plot_view_request.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
 
 class PlotScreen extends ConsumerStatefulWidget {
@@ -29,15 +31,24 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
   final Map<String, SplayTreeMap<int, double?>> _liveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
+  final Map<String, SplayTreeMap<int, double?>> _deferredLiveValuesByChannel =
+      <String, SplayTreeMap<int, double?>>{};
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final DateFormat _localTimeAxisFormat = DateFormat('HH:mm');
 
   PlotQueryResponse? _response;
   Timer? _liveTimer;
   bool _isLoading = false;
   bool _isPollingLive = false;
+  bool _isChartInteractionActive = false;
+  bool _isXAxisZoomPinned = false;
   bool _overlayCharts = false;
   bool _logScale = false;
   String? _error;
   String? _liveError;
+  String? _deferredLiveError;
+  int? _deferredServerNowUtcMs;
+  int? _deferredLastLiveAfterUtcMs;
   int _lastLiveAfterUtcMs = 0;
   int _lastServerNowUtcMs = 0;
 
@@ -71,7 +82,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _response = null;
       _lastLiveAfterUtcMs = 0;
       _lastServerNowUtcMs = 0;
+      _deferredServerNowUtcMs = null;
+      _deferredLastLiveAfterUtcMs = null;
+      _deferredLiveError = null;
+      _isChartInteractionActive = false;
+      _isXAxisZoomPinned = false;
       _liveValuesByChannel.clear();
+      _deferredLiveValuesByChannel.clear();
     });
 
     try {
@@ -137,9 +154,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return;
     }
 
-    setState(() {
-      _isPollingLive = true;
-    });
+    _isPollingLive = true;
     try {
       final repository = ref.read(plotRepositoryProvider);
       final liveResponse = await repository.pollLive(
@@ -151,38 +166,84 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       if (!mounted) {
         return;
       }
-      setState(() {
-        for (final LivePlotSeries series in liveResponse.series) {
-          final buffer = _liveValuesByChannel.putIfAbsent(
-            series.channel,
-            () => SplayTreeMap<int, double?>(),
-          );
-          for (final RawPoint point in series.expandSamples()) {
-            buffer[point.utcMs] = point.value;
-          }
-        }
-        _lastServerNowUtcMs = liveResponse.serverNowUtcMs;
-        if (liveResponse.serverNowUtcMs > _lastLiveAfterUtcMs) {
-          _lastLiveAfterUtcMs = liveResponse.serverNowUtcMs;
-        }
-        _liveError = null;
-      });
+      if (_isChartInteractionActive || _isXAxisZoomPinned) {
+        _stageDeferredLiveUpdate(liveResponse);
+        return;
+      }
+      _applyLiveUpdate(liveResponse);
     } catch (error) {
       if (!mounted) {
+        return;
+      }
+      if (_isChartInteractionActive || _isXAxisZoomPinned) {
+        _deferredLiveError = error.toString();
         return;
       }
       setState(() {
         _liveError = error.toString();
       });
     } finally {
-      if (!mounted) {
-        _isPollingLive = false;
-      } else {
-        setState(() {
-          _isPollingLive = false;
-        });
-      }
+      _isPollingLive = false;
     }
+  }
+
+  void _openOptionsPanel() {
+    _scaffoldKey.currentState?.openEndDrawer();
+  }
+
+  void _beginChartInteraction() {
+    _isChartInteractionActive = true;
+  }
+
+  void _endChartInteraction() {
+    if (!_isChartInteractionActive) {
+      return;
+    }
+    _isChartInteractionActive = false;
+    if (_isXAxisZoomPinned) {
+      return;
+    }
+    _flushDeferredLiveUpdate();
+  }
+
+  void _handleActualRangeChanged(ActualRangeChangedArgs args) {
+    if (args.orientation != AxisOrientation.horizontal) {
+      return;
+    }
+
+    final actualMin = _asDateTime(args.actualMin);
+    final actualMax = _asDateTime(args.actualMax);
+    final visibleMin = _asDateTime(args.visibleMin);
+    final visibleMax = _asDateTime(args.visibleMax);
+    if (actualMin == null ||
+        actualMax == null ||
+        visibleMin == null ||
+        visibleMax == null) {
+      return;
+    }
+
+    final pinned = !_isSameMoment(actualMin, visibleMin) ||
+        !_isSameMoment(actualMax, visibleMax);
+    final wasPinned = _isXAxisZoomPinned;
+    _isXAxisZoomPinned = pinned;
+    if (wasPinned && !pinned && !_isChartInteractionActive) {
+      _flushDeferredLiveUpdate();
+    }
+  }
+
+  DateTime? _asDateTime(dynamic value) {
+    if (value is DateTime) {
+      return value;
+    }
+    if (value is num) {
+      return DateTime.fromMillisecondsSinceEpoch(value.round());
+    }
+    return null;
+  }
+
+  bool _isSameMoment(DateTime left, DateTime right) {
+    return (left.millisecondsSinceEpoch - right.millisecondsSinceEpoch).abs() <=
+        1000;
   }
 
   @override
@@ -218,11 +279,19 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }
 
     final charts = _buildCharts(request);
+    final isWideLayout = MediaQuery.sizeOf(context).width >= 960;
 
     return Scaffold(
+      key: _scaffoldKey,
       appBar: AppBar(
         title: const Text('Plots'),
         actions: <Widget>[
+          if (!isWideLayout)
+            IconButton(
+              onPressed: _openOptionsPanel,
+              icon: const Icon(Icons.tune),
+              tooltip: 'View options',
+            ),
           IconButton(
             onPressed: _isLoading ? null : _loadPlot,
             icon: const Icon(Icons.refresh),
@@ -230,99 +299,58 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
           ),
         ],
       ),
+      endDrawer: isWideLayout
+          ? null
+          : Drawer(
+              width: 360,
+              child: SafeArea(
+                child: _buildOptionsPanel(
+                  theme,
+                  request,
+                  charts,
+                  showDrawerHeading: true,
+                ),
+              ),
+            ),
       body: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: _buildSummaryCard(request, theme),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: _buildControlRow(theme),
-            ),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text(
-                  _error!,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: theme.colorScheme.error,
-                  ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: isWideLayout
+              ? Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Expanded(
+                      child: _buildMainPanel(
+                        theme,
+                        request,
+                        charts,
+                        showOptionsButton: false,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    SizedBox(
+                      width: 340,
+                      child: _buildOptionsPanel(theme, request, charts),
+                    ),
+                  ],
+                )
+              : _buildMainPanel(
+                  theme,
+                  request,
+                  charts,
+                  showOptionsButton: true,
                 ),
-              ),
-            if (_liveError != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text(
-                  'Live polling degraded: $_liveError',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.error,
-                  ),
-                ),
-              ),
-            Expanded(
-              child: _isLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : charts.isEmpty
-                      ? Center(
-                          child: Text(
-                            'Waiting for the first history or live samples.',
-                            style: theme.textTheme.titleMedium,
-                          ),
-                        )
-                      : ListView.separated(
-                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                          itemCount: charts.length,
-                          separatorBuilder: (BuildContext context, int index) {
-                            return const SizedBox(height: 12);
-                          },
-                          itemBuilder: (BuildContext context, int index) {
-                            final chart = charts[index];
-                            return Card(
-                              child: Padding(
-                                padding: const EdgeInsets.all(14),
-                                child: SizedBox(
-                                  height: 320,
-                                  child: SfCartesianChart(
-                                    title: ChartTitle(text: chart.title),
-                                    legend: Legend(
-                                      isVisible: chart.legendVisible,
-                                      position: LegendPosition.bottom,
-                                    ),
-                                    zoomPanBehavior: ZoomPanBehavior(
-                                      enablePinching: true,
-                                      enablePanning: true,
-                                      enableMouseWheelZooming: true,
-                                      zoomMode: ZoomMode.x,
-                                    ),
-                                    trackballBehavior: TrackballBehavior(
-                                      enable: true,
-                                      activationMode: ActivationMode.singleTap,
-                                    ),
-                                    primaryXAxis: DateTimeAxis(
-                                      edgeLabelPlacement:
-                                          EdgeLabelPlacement.shift,
-                                    ),
-                                    primaryYAxis: _logScale
-                                        ? LogarithmicAxis(logBase: 10)
-                                        : NumericAxis(),
-                                    series: chart.series,
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-            ),
-          ],
         ),
       ),
     );
   }
 
-  Widget _buildSummaryCard(PlotViewRequest request, ThemeData theme) {
+  Widget _buildMainPanel(
+    ThemeData theme,
+    PlotViewRequest request,
+    List<_ChartBundle> charts, {
+    required bool showOptionsButton,
+  }) {
     final response = _response;
     final historyEnd = response == null
         ? null
@@ -331,63 +359,158 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             isUtc: true,
           ).toLocal();
     final liveNow = _lastServerNowUtcMs <= 0
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(
-            _lastServerNowUtcMs,
-            isUtc: true,
-          ).toLocal();
+      ? null
+      : DateTime.fromMillisecondsSinceEpoch(
+          _lastServerNowUtcMs,
+          isUtc: true,
+        ).toLocal();
+    final mixedUnits =
+        _overlayCharts && _unitsForChannels(request.channels).length > 1;
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              'Plot workspace',
-              style: theme.textTheme.headlineSmall,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '${request.channels.length} channel(s) from ${_formatDateTime(request.startLocal)} '
-              'using ${request.sourceLabel == 'Custom' ? 'a custom local start' : request.sourceLabel} '
-              '(UTC${request.timeZoneOffsetLabel}).',
-              style: theme.textTheme.bodyMedium,
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                _InfoChip(
-                  icon: Icons.history,
-                  label: historyEnd == null
-                      ? 'History pending'
-                      : 'History to ${_formatDateTime(historyEnd)}',
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Text(
+                        'Plot workspace',
+                        style: theme.textTheme.titleLarge,
+                      ),
+                    ),
+                    if (showOptionsButton)
+                      OutlinedButton.icon(
+                        onPressed: _openOptionsPanel,
+                        icon: const Icon(Icons.tune),
+                        label: const Text('Options'),
+                      ),
+                  ],
                 ),
-                _InfoChip(
-                  icon: Icons.wifi_tethering,
-                  label: liveNow == null
-                      ? 'Live waiting'
-                      : 'Live to ${_formatDateTime(liveNow)}',
+                const SizedBox(height: 6),
+                Text(
+                  '${request.channels.length} channel(s) from ${_formatDateTime(request.startLocal)} '
+                  'using ${request.sourceLabel == 'Custom' ? 'a custom local start' : request.sourceLabel} '
+                  '(UTC${request.timeZoneOffsetLabel}).',
+                  style: theme.textTheme.bodyMedium,
                 ),
-                _InfoChip(
-                  icon: Icons.bubble_chart,
-                  label: _response == null
-                      ? 'No series yet'
-                      : '${_response!.series.length} history series',
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: <Widget>[
+                    _InfoChip(
+                      icon: Icons.history,
+                      label: historyEnd == null
+                          ? 'History pending'
+                          : 'History to ${_formatDateTime(historyEnd)}',
+                      compact: true,
+                    ),
+                    _InfoChip(
+                      icon: Icons.wifi_tethering,
+                      label: liveNow == null
+                          ? 'Live waiting'
+                          : 'Live to ${_formatDateTime(liveNow)}',
+                      compact: true,
+                    ),
+                    _InfoChip(
+                      icon: Icons.bubble_chart,
+                      label: _response == null
+                          ? 'No series yet'
+                          : '${_response!.series.length} history series',
+                      compact: true,
+                    ),
+                    if (mixedUnits)
+                      const _InfoChip(
+                        icon: Icons.straighten,
+                        label: 'Overlay mixes units',
+                        compact: true,
+                      ),
+                  ],
                 ),
               ],
             ),
-          ],
+          ),
         ),
-      ),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 12, 0, 8),
+            child: Text(
+              _error!,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ),
+        if (_liveError != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 0, 0, 8),
+            child: Text(
+              'Live polling degraded: $_liveError',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : charts.isEmpty
+                  ? Center(
+                      child: Text(
+                        'Waiting for the first history or live samples.',
+                        style: theme.textTheme.titleMedium,
+                      ),
+                    )
+                  : ListView.separated(
+                      padding: const EdgeInsets.only(bottom: 16),
+                      itemCount: charts.length,
+                      separatorBuilder: (BuildContext context, int index) {
+                        return const SizedBox(height: 14);
+                      },
+                      itemBuilder: (BuildContext context, int index) {
+                        return _buildChartCard(
+                          charts[index],
+                          chartCount: charts.length,
+                        );
+                      },
+                    ),
+        ),
+      ],
     );
   }
 
-  Widget _buildControlRow(ThemeData theme) {
-    return Row(
+  Widget _buildOptionsPanel(
+    ThemeData theme,
+    PlotViewRequest request,
+    List<_ChartBundle> charts, {
+    bool showDrawerHeading = false,
+  }) {
+    final content = ListView(
+      padding: const EdgeInsets.all(16),
       children: <Widget>[
+        Text(
+          'View options',
+          style: theme.textTheme.titleLarge,
+        ),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          onPressed: _isLoading ? null : _loadPlot,
+          icon: const Icon(Icons.refresh),
+          label: const Text('Reload data'),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'Chart arrangement',
+          style: theme.textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
         SegmentedButton<bool>(
           segments: const <ButtonSegment<bool>>[
             ButtonSegment<bool>(value: false, label: Text('Split')),
@@ -400,7 +523,12 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             });
           },
         ),
-        const SizedBox(width: 12),
+        const SizedBox(height: 16),
+        Text(
+          'Y scale',
+          style: theme.textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
         SegmentedButton<bool>(
           segments: const <ButtonSegment<bool>>[
             ButtonSegment<bool>(value: false, label: Text('Linear')),
@@ -413,13 +541,50 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             });
           },
         ),
-        const Spacer(),
+        const SizedBox(height: 16),
         Text(
-          _isPollingLive ? 'Polling...' : 'Live ready',
+          'Local time range',
+          style: theme.textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Start: ${_formatDateTime(request.startLocal)} (UTC${request.timeZoneOffsetLabel})',
+          style: theme.textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 4),
+        Text(
+          request.sourceLabel == 'Custom'
+              ? 'Custom local start'
+              : 'Preset: ${request.sourceLabel}',
           style: theme.textTheme.bodySmall,
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'Channels',
+          style: theme.textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: request.channels
+              .map(
+                (String channel) => _InfoChip(
+                  icon: Icons.sensors,
+                  label: channel,
+                  compact: true,
+                ),
+              )
+              .toList(growable: false),
         ),
       ],
     );
+
+    if (showDrawerHeading) {
+      return RepaintBoundary(child: content);
+    }
+
+    return RepaintBoundary(child: Card(child: content));
   }
 
   List<_ChartBundle> _buildCharts(PlotViewRequest request) {
@@ -428,11 +593,16 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return const <_ChartBundle>[];
     }
 
+    final seriesByChannel = <String, PlotSeries>{
+      for (final PlotSeries series in response.series) series.channel: series,
+    };
+
     if (_overlayCharts) {
       return <_ChartBundle>[
         _ChartBundle(
           title: 'All selected channels',
           legendVisible: true,
+          yAxisConfig: _buildYAxisConfig(request.channels, seriesByChannel),
           series: _buildSeriesForChannels(request.channels, splitMode: false),
         ),
       ];
@@ -440,9 +610,11 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
     return List<_ChartBundle>.generate(request.channels.length, (int index) {
       final channel = request.channels[index];
+      final series = seriesByChannel[channel];
       return _ChartBundle(
-        title: channel,
+        title: _displayNameForChannel(channel, series),
         legendVisible: false,
+        yAxisConfig: _buildYAxisConfig(<String>[channel], seriesByChannel),
         series: _buildSeriesForChannels(<String>[channel], splitMode: true),
       );
     }, growable: false);
@@ -466,20 +638,25 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       final channel = channels[index];
       final color = _palette[index % _palette.length];
       final historySeries = seriesByChannel[channel];
+      final displayName = _displayNameForChannel(channel, historySeries);
       final liveSeries = _expandLivePoints(channel);
 
       if (historySeries is RawPlotSeries) {
-        final points = _sanitizeLinePoints(historySeries.expandSamples());
+        final points = _mergeRawHistoryAndLive(
+          historySeries.expandSamples(),
+          liveSeries,
+        );
         chartSeries.add(
           LineSeries<RawPoint, DateTime>(
             dataSource: points,
             xValueMapper: (RawPoint point, _) => point.localTimestamp,
             yValueMapper: (RawPoint point, _) => point.value,
-            name: historySeries.displayName,
+            name: displayName,
             color: color,
-            width: 2,
+            width: 1.6,
           ),
         );
+        continue;
       }
 
       if (historySeries is BucketedPlotSeries) {
@@ -494,7 +671,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                       .toLocal(),
               lowValueMapper: (BucketPoint point, _) => point.minValue,
               highValueMapper: (BucketPoint point, _) => point.maxValue,
-              name: '${historySeries.displayName} band',
+              name: '$displayName band',
               color: color.withValues(alpha: 0.16),
               borderColor: color.withValues(alpha: 0.45),
             ),
@@ -506,10 +683,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             xValueMapper: (_LinePoint point, _) => point.time,
             yValueMapper: (_LinePoint point, _) => point.value,
             name: splitMode
-                ? historySeries.displayName
-                : '${historySeries.displayName} avg',
+                ? displayName
+                : '$displayName avg',
             color: color,
-            width: splitMode ? 2 : 2.5,
+            width: splitMode ? 1.4 : 1.6,
           ),
         );
       }
@@ -520,10 +697,9 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             dataSource: liveSeries,
             xValueMapper: (RawPoint point, _) => point.localTimestamp,
             yValueMapper: (RawPoint point, _) => point.value,
-            name: splitMode ? 'Live' : '$channel live',
+            name: splitMode ? 'Live' : '$displayName live',
             color: color.withValues(alpha: 0.9),
-            width: 2,
-            dashArray: const <double>[6, 4],
+            width: 1.2,
           ),
         );
       }
@@ -541,6 +717,29 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return RawPoint(utcMs: entry.key, value: entry.value);
     }).toList(growable: false);
     return _sanitizeLinePoints(points);
+  }
+
+  List<RawPoint> _mergeRawHistoryAndLive(
+    List<RawPoint> historyPoints,
+    List<RawPoint> livePoints,
+  ) {
+    if (livePoints.isEmpty) {
+      return _sanitizeLinePoints(historyPoints);
+    }
+    final merged = SplayTreeMap<int, double?>();
+    for (final RawPoint point in historyPoints) {
+      merged[point.utcMs] = point.value;
+    }
+    for (final RawPoint point in livePoints) {
+      merged[point.utcMs] = point.value;
+    }
+    return _sanitizeLinePoints(
+      merged.entries
+          .map((MapEntry<int, double?> entry) {
+            return RawPoint(utcMs: entry.key, value: entry.value);
+          })
+          .toList(growable: false),
+    );
   }
 
   List<RawPoint> _sanitizeLinePoints(List<RawPoint> points) {
@@ -589,6 +788,361 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }).toList(growable: false);
   }
 
+  Widget _buildChartCard(
+    _ChartBundle chart, {
+    required int chartCount,
+  }) {
+    final titleStyle = Theme.of(context).textTheme.titleSmall?.copyWith(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+        child: SizedBox(
+          height: _chartHeightFor(chartCount),
+          child: SfCartesianChart(
+            title: ChartTitle(
+              text: _compactChartTitle(chart.title),
+              alignment: ChartAlignment.near,
+              textStyle: titleStyle,
+            ),
+            legend: Legend(
+              isVisible: chart.legendVisible,
+              position: LegendPosition.bottom,
+            ),
+            plotAreaBorderWidth: 0,
+            zoomPanBehavior: ZoomPanBehavior(
+              enablePinching: true,
+              enablePanning: true,
+              enableMouseWheelZooming: true,
+              zoomMode: ZoomMode.x,
+            ),
+            trackballBehavior: TrackballBehavior(
+              enable: true,
+              activationMode: ActivationMode.longPress,
+              tooltipSettings: const InteractiveTooltip(
+                enable: true,
+                format: 'point.x\npoint.y',
+                decimalPlaces: 4,
+              ),
+            ),
+            onChartTouchInteractionDown: (_) => _beginChartInteraction(),
+            onChartTouchInteractionMove: (_) => _beginChartInteraction(),
+            onChartTouchInteractionUp: (_) => _endChartInteraction(),
+            onActualRangeChanged: _handleActualRangeChanged,
+            primaryXAxis: DateTimeAxis(
+              title: const AxisTitle(text: 'Local time'),
+              dateFormat: _localTimeAxisFormat,
+              edgeLabelPlacement: EdgeLabelPlacement.shift,
+              labelIntersectAction: AxisLabelIntersectAction.rotate45,
+              maximumLabels: 6,
+            ),
+            primaryYAxis: _buildYAxis(chart.yAxisConfig),
+            series: chart.series,
+          ),
+        ),
+      ),
+    );
+  }
+
+  ChartAxis _buildYAxis(_YAxisConfig config) {
+    final trimmedTitle = config.title.trim();
+    if (_logScale) {
+      if (trimmedTitle.isEmpty) {
+        return LogarithmicAxis(
+          logBase: 10,
+          minimum: config.minimum,
+          maximum: config.maximum,
+        );
+      }
+      return LogarithmicAxis(
+        logBase: 10,
+        minimum: config.minimum,
+        maximum: config.maximum,
+        title: AxisTitle(text: trimmedTitle),
+      );
+    }
+    if (trimmedTitle.isEmpty) {
+      return NumericAxis(
+        minimum: config.minimum,
+        maximum: config.maximum,
+        decimalPlaces: config.decimalPlaces,
+        rangePadding: ChartRangePadding.none,
+      );
+    }
+    return NumericAxis(
+      minimum: config.minimum,
+      maximum: config.maximum,
+      decimalPlaces: config.decimalPlaces,
+      rangePadding: ChartRangePadding.none,
+      title: AxisTitle(text: trimmedTitle),
+    );
+  }
+
+  double _chartHeightFor(int chartCount) {
+    final size = MediaQuery.sizeOf(context);
+    final isWideLayout = size.width >= 960;
+    final baseHeight = chartCount == 1
+        ? size.height * (isWideLayout ? 0.72 : 0.68)
+        : size.height * (isWideLayout ? 0.58 : 0.54);
+    final minimum = chartCount == 1 ? 500.0 : 420.0;
+    final maximum = chartCount == 1 ? 760.0 : 620.0;
+    return math.max(minimum, math.min(maximum, baseHeight));
+  }
+
+  void _applyLiveUpdate(LivePlotResponse liveResponse) {
+    final didChange = _didLivePayloadChange(liveResponse);
+    if (!didChange) {
+      _liveError = null;
+      _lastServerNowUtcMs = liveResponse.serverNowUtcMs;
+      if (liveResponse.serverNowUtcMs > _lastLiveAfterUtcMs) {
+        _lastLiveAfterUtcMs = liveResponse.serverNowUtcMs;
+      }
+      return;
+    }
+
+    setState(() {
+      _mergeLiveSeries(_liveValuesByChannel, liveResponse.series);
+      _lastServerNowUtcMs = liveResponse.serverNowUtcMs;
+      if (liveResponse.serverNowUtcMs > _lastLiveAfterUtcMs) {
+        _lastLiveAfterUtcMs = liveResponse.serverNowUtcMs;
+      }
+      _liveError = null;
+    });
+  }
+
+  void _stageDeferredLiveUpdate(LivePlotResponse liveResponse) {
+    _mergeLiveSeries(_deferredLiveValuesByChannel, liveResponse.series);
+    _deferredLiveError = null;
+    _deferredServerNowUtcMs = liveResponse.serverNowUtcMs;
+    if (_deferredLastLiveAfterUtcMs == null ||
+        liveResponse.serverNowUtcMs > _deferredLastLiveAfterUtcMs!) {
+      _deferredLastLiveAfterUtcMs = liveResponse.serverNowUtcMs;
+    }
+  }
+
+  void _flushDeferredLiveUpdate() {
+    final hasDeferredValues = _deferredLiveValuesByChannel.values.any(
+      (SplayTreeMap<int, double?> values) => values.isNotEmpty,
+    );
+    final hasDeferredState = hasDeferredValues ||
+        _deferredLiveError != null ||
+        _deferredServerNowUtcMs != null ||
+        _deferredLastLiveAfterUtcMs != null;
+    if (!hasDeferredState || !mounted) {
+      _clearDeferredLiveUpdate();
+      return;
+    }
+
+    setState(() {
+      if (hasDeferredValues) {
+        _mergeDeferredIntoLive();
+      }
+      if (_deferredServerNowUtcMs != null) {
+        _lastServerNowUtcMs = _deferredServerNowUtcMs!;
+      }
+      if (_deferredLastLiveAfterUtcMs != null &&
+          _deferredLastLiveAfterUtcMs! > _lastLiveAfterUtcMs) {
+        _lastLiveAfterUtcMs = _deferredLastLiveAfterUtcMs!;
+      }
+      if (_deferredLiveError != null) {
+        _liveError = _deferredLiveError;
+      } else if (hasDeferredValues || _deferredServerNowUtcMs != null) {
+        _liveError = null;
+      }
+      _clearDeferredLiveUpdate();
+    });
+  }
+
+  void _mergeDeferredIntoLive() {
+    for (final MapEntry<String, SplayTreeMap<int, double?>> entry
+        in _deferredLiveValuesByChannel.entries) {
+      final buffer = _liveValuesByChannel.putIfAbsent(
+        entry.key,
+        () => SplayTreeMap<int, double?>(),
+      );
+      buffer.addAll(entry.value);
+    }
+  }
+
+  void _clearDeferredLiveUpdate() {
+    _deferredLiveValuesByChannel.clear();
+    _deferredLiveError = null;
+    _deferredServerNowUtcMs = null;
+    _deferredLastLiveAfterUtcMs = null;
+  }
+
+  bool _didLivePayloadChange(LivePlotResponse liveResponse) {
+    if (_liveError != null) {
+      return true;
+    }
+    if (liveResponse.serverNowUtcMs != _lastServerNowUtcMs) {
+      return true;
+    }
+    for (final LivePlotSeries series in liveResponse.series) {
+      if (series.values.isNotEmpty) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _mergeLiveSeries(
+    Map<String, SplayTreeMap<int, double?>> target,
+    List<LivePlotSeries> seriesList,
+  ) {
+    for (final LivePlotSeries series in seriesList) {
+      final buffer = target.putIfAbsent(
+        series.channel,
+        () => SplayTreeMap<int, double?>(),
+      );
+      for (final RawPoint point in series.expandSamples()) {
+        buffer[point.utcMs] = point.value;
+      }
+    }
+  }
+
+  String _displayNameForChannel(String channel, PlotSeries? series) {
+    final displayName = series?.displayName.trim() ?? '';
+    return displayName.isEmpty ? channel : displayName;
+  }
+
+  List<String> _unitsForChannels(List<String> channels) {
+    final response = _response;
+    if (response == null) {
+      return const <String>[];
+    }
+    final seriesByChannel = <String, PlotSeries>{
+      for (final PlotSeries series in response.series) series.channel: series,
+    };
+    final units = SplayTreeSet<String>();
+    for (final String channel in channels) {
+      final unit = seriesByChannel[channel]?.unit.trim() ?? '';
+      if (unit.isNotEmpty) {
+        units.add(unit);
+      }
+    }
+    return units.toList(growable: false);
+  }
+
+  String _yAxisTitleForChannels(
+    List<String> channels,
+    Map<String, PlotSeries> seriesByChannel,
+  ) {
+    final units = SplayTreeSet<String>();
+    for (final String channel in channels) {
+      final unit = seriesByChannel[channel]?.unit.trim() ?? '';
+      if (unit.isNotEmpty) {
+        units.add(unit);
+      }
+    }
+    if (units.isEmpty) {
+      return '';
+    }
+    if (units.length == 1) {
+      return units.first;
+    }
+    return 'mixed units';
+  }
+
+  _YAxisConfig _buildYAxisConfig(
+    List<String> channels,
+    Map<String, PlotSeries> seriesByChannel,
+  ) {
+    final title = _yAxisTitleForChannels(channels, seriesByChannel);
+    final range = _DataRange.empty();
+
+    for (final String channel in channels) {
+      final PlotSeries? historySeries = seriesByChannel[channel];
+      if (historySeries is RawPlotSeries) {
+        for (final RawPoint point
+            in _sanitizeLinePoints(historySeries.expandSamples())) {
+          range.include(point.value);
+        }
+      } else if (historySeries is BucketedPlotSeries) {
+        for (final BucketPoint point
+            in _sanitizeBucketPoints(historySeries.expandBuckets())) {
+          range.include(point.minValue);
+          range.include(point.maxValue);
+        }
+      }
+
+      for (final RawPoint point in _expandLivePoints(channel)) {
+        range.include(point.value);
+      }
+    }
+
+    if (!range.hasValues) {
+      return _YAxisConfig(title: title, decimalPlaces: 3);
+    }
+
+    if (_logScale) {
+      final minValue = range.minimum!;
+      final maxValue = range.maximum!;
+      if (minValue == maxValue) {
+        return _YAxisConfig(
+          title: title,
+          minimum: minValue / 1.2,
+          maximum: maxValue * 1.2,
+          decimalPlaces: 3,
+        );
+      }
+      final paddingFactor = 0.04;
+      return _YAxisConfig(
+        title: title,
+        minimum: math.max(minValue * (1 - paddingFactor), double.minPositive),
+        maximum: maxValue * (1 + paddingFactor),
+        decimalPlaces: 3,
+      );
+    }
+
+    final minValue = range.minimum!;
+    final maxValue = range.maximum!;
+    final valueSpan = maxValue - minValue;
+    final anchor = math.max(
+      math.max(minValue.abs(), maxValue.abs()),
+      1e-9,
+    );
+    final padding = valueSpan == 0
+        ? anchor * 1e-4
+        : math.max(valueSpan * 0.08, anchor * 1e-6);
+    final axisMinimum = minValue - padding;
+    final axisMaximum = maxValue + padding;
+
+    return _YAxisConfig(
+      title: title,
+      minimum: axisMinimum,
+      maximum: axisMaximum,
+      decimalPlaces: _decimalPlacesForSpan(axisMaximum - axisMinimum),
+    );
+  }
+
+  int _decimalPlacesForSpan(double span) {
+    if (!span.isFinite || span <= 0) {
+      return 3;
+    }
+    final labelStep = span / 5;
+    if (labelStep >= 1) {
+      return 0;
+    }
+    final decimals = (-math.log(labelStep) / math.ln10).ceil();
+    return math.max(0, math.min(8, decimals));
+  }
+
+  String _compactChartTitle(String title) {
+    final trimmed = title.trim();
+    if (trimmed.isEmpty) {
+      return trimmed;
+    }
+    final isPhoneWidth = MediaQuery.sizeOf(context).width < 600;
+    final maxChars = isPhoneWidth ? 34 : 52;
+    if (trimmed.length <= maxChars) {
+      return trimmed;
+    }
+    return '${trimmed.substring(0, maxChars - 1)}...';
+  }
+
   int _targetBucketsFor(PlotViewRequest request) {
     final span = DateTime.now().difference(request.startLocal);
     if (span <= const Duration(hours: 2) && request.channels.length <= 3) {
@@ -617,12 +1171,50 @@ class _ChartBundle {
   const _ChartBundle({
     required this.title,
     required this.legendVisible,
+    required this.yAxisConfig,
     required this.series,
   });
 
   final String title;
   final bool legendVisible;
+  final _YAxisConfig yAxisConfig;
   final List<CartesianSeries<dynamic, DateTime>> series;
+}
+
+class _YAxisConfig {
+  const _YAxisConfig({
+    required this.title,
+    this.minimum,
+    this.maximum,
+    required this.decimalPlaces,
+  });
+
+  final String title;
+  final double? minimum;
+  final double? maximum;
+  final int decimalPlaces;
+}
+
+class _DataRange {
+  _DataRange.empty();
+
+  double? minimum;
+  double? maximum;
+
+  bool get hasValues => minimum != null && maximum != null;
+
+  void include(double? value) {
+    if (value == null || !value.isFinite) {
+      return;
+    }
+    if (!hasValues) {
+      minimum = value;
+      maximum = value;
+      return;
+    }
+    minimum = math.min(minimum!, value);
+    maximum = math.max(maximum!, value);
+  }
 }
 
 class _LinePoint {
@@ -633,16 +1225,29 @@ class _LinePoint {
 }
 
 class _InfoChip extends StatelessWidget {
-  const _InfoChip({required this.icon, required this.label});
+  const _InfoChip({
+    required this.icon,
+    required this.label,
+    this.compact = false,
+  });
 
   final IconData icon;
   final String label;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     return Chip(
-      avatar: Icon(icon, size: 18),
-      label: Text(label),
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: compact ? VisualDensity.compact : VisualDensity.standard,
+      padding: compact
+          ? const EdgeInsets.symmetric(horizontal: 4, vertical: 0)
+          : null,
+      avatar: Icon(icon, size: compact ? 14 : 18),
+      label: Text(
+        label,
+        style: compact ? Theme.of(context).textTheme.bodySmall : null,
+      ),
     );
   }
 }
