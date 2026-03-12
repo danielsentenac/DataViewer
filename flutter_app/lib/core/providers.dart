@@ -3,7 +3,7 @@ import 'package:dataviewer/core/networking/api_client.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 final appConfigProvider = Provider<AppConfig>((ref) {
-  return AppConfig.fromEnvironment();
+  return const AppConfig(baseUrl: AppConfig.defaultBaseUrl);
 });
 
 final apiClientProvider = Provider<ApiClient>((ref) {

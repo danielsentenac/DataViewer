@@ -35,18 +35,12 @@ The app stays intentionally simple:
 ## Deployment targets
 
 - Backend Tomcat: `http://olserver134.virgo.infn.it:8081/dataviewer`
-- Default Flutter API base URL: `http://olserver134.virgo.infn.it:8081/dataviewer`
+- Flutter API base URL is hardcoded to: `http://olserver134.virgo.infn.it:8081/dataviewer`
 
 Deploy the backend to `olserver134` with:
 
 ```bash
 SSHPASS='<password>' ./scripts/deploy_backend_olserver134.sh
-```
-
-Override the Flutter API target at launch/build time with:
-
-```bash
-flutter run --dart-define=DATAVIEWER_BASE_URL=http://olserver134.virgo.infn.it:8081/dataviewer
 ```
 
 ## Important integration rule
