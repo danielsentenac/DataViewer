@@ -28,6 +28,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     Color(0xFFC97A40),
     Color(0xFF0081A7),
   ];
+  static final NumberFormat _scientificNumberFormat =
+      NumberFormat('0.#####E0');
 
   final Map<String, SplayTreeMap<int, double?>> _liveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
@@ -41,7 +43,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   bool _isLoading = false;
   bool _isPollingLive = false;
   bool _isChartInteractionActive = false;
-  bool _isXAxisZoomPinned = false;
   bool _overlayCharts = false;
   bool _logScale = false;
   String? _error;
@@ -86,7 +87,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _deferredLastLiveAfterUtcMs = null;
       _deferredLiveError = null;
       _isChartInteractionActive = false;
-      _isXAxisZoomPinned = false;
       _liveValuesByChannel.clear();
       _deferredLiveValuesByChannel.clear();
     });
@@ -166,7 +166,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       if (!mounted) {
         return;
       }
-      if (_isChartInteractionActive || _isXAxisZoomPinned) {
+      if (_isChartInteractionActive) {
         _stageDeferredLiveUpdate(liveResponse);
         return;
       }
@@ -175,7 +175,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       if (!mounted) {
         return;
       }
-      if (_isChartInteractionActive || _isXAxisZoomPinned) {
+      if (_isChartInteractionActive) {
         _deferredLiveError = error.toString();
         return;
       }
@@ -200,50 +200,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return;
     }
     _isChartInteractionActive = false;
-    if (_isXAxisZoomPinned) {
-      return;
-    }
     _flushDeferredLiveUpdate();
-  }
-
-  void _handleActualRangeChanged(ActualRangeChangedArgs args) {
-    if (args.orientation != AxisOrientation.horizontal) {
-      return;
-    }
-
-    final actualMin = _asDateTime(args.actualMin);
-    final actualMax = _asDateTime(args.actualMax);
-    final visibleMin = _asDateTime(args.visibleMin);
-    final visibleMax = _asDateTime(args.visibleMax);
-    if (actualMin == null ||
-        actualMax == null ||
-        visibleMin == null ||
-        visibleMax == null) {
-      return;
-    }
-
-    final pinned = !_isSameMoment(actualMin, visibleMin) ||
-        !_isSameMoment(actualMax, visibleMax);
-    final wasPinned = _isXAxisZoomPinned;
-    _isXAxisZoomPinned = pinned;
-    if (wasPinned && !pinned && !_isChartInteractionActive) {
-      _flushDeferredLiveUpdate();
-    }
-  }
-
-  DateTime? _asDateTime(dynamic value) {
-    if (value is DateTime) {
-      return value;
-    }
-    if (value is num) {
-      return DateTime.fromMillisecondsSinceEpoch(value.round());
-    }
-    return null;
-  }
-
-  bool _isSameMoment(DateTime left, DateTime right) {
-    return (left.millisecondsSinceEpoch - right.millisecondsSinceEpoch).abs() <=
-        1000;
   }
 
   @override
@@ -662,29 +619,12 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       if (historySeries is BucketedPlotSeries) {
         final bucketPoints =
             _sanitizeBucketPoints(historySeries.expandBuckets());
-        if (splitMode) {
-          chartSeries.add(
-            RangeAreaSeries<BucketPoint, DateTime>(
-              dataSource: bucketPoints,
-              xValueMapper: (BucketPoint point, _) =>
-                  DateTime.fromMillisecondsSinceEpoch(point.utcMs, isUtc: true)
-                      .toLocal(),
-              lowValueMapper: (BucketPoint point, _) => point.minValue,
-              highValueMapper: (BucketPoint point, _) => point.maxValue,
-              name: '$displayName band',
-              color: color.withValues(alpha: 0.16),
-              borderColor: color.withValues(alpha: 0.45),
-            ),
-          );
-        }
         chartSeries.add(
           LineSeries<_LinePoint, DateTime>(
             dataSource: _bucketMidpoints(bucketPoints),
             xValueMapper: (_LinePoint point, _) => point.time,
             yValueMapper: (_LinePoint point, _) => point.value,
-            name: splitMode
-                ? displayName
-                : '$displayName avg',
+            name: displayName,
             color: color,
             width: splitMode ? 1.4 : 1.6,
           ),
@@ -830,7 +770,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             onChartTouchInteractionDown: (_) => _beginChartInteraction(),
             onChartTouchInteractionMove: (_) => _beginChartInteraction(),
             onChartTouchInteractionUp: (_) => _endChartInteraction(),
-            onActualRangeChanged: _handleActualRangeChanged,
             primaryXAxis: DateTimeAxis(
               title: const AxisTitle(text: 'Local time'),
               dateFormat: _localTimeAxisFormat,
@@ -854,12 +793,14 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
           logBase: 10,
           minimum: config.minimum,
           maximum: config.maximum,
+          numberFormat: _scientificNumberFormat,
         );
       }
       return LogarithmicAxis(
         logBase: 10,
         minimum: config.minimum,
         maximum: config.maximum,
+        numberFormat: _scientificNumberFormat,
         title: AxisTitle(text: trimmedTitle),
       );
     }
@@ -867,14 +808,18 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return NumericAxis(
         minimum: config.minimum,
         maximum: config.maximum,
+        interval: config.interval,
         decimalPlaces: config.decimalPlaces,
+        numberFormat: _scientificNumberFormat,
         rangePadding: ChartRangePadding.none,
       );
     }
     return NumericAxis(
       minimum: config.minimum,
       maximum: config.maximum,
+      interval: config.interval,
       decimalPlaces: config.decimalPlaces,
+      numberFormat: _scientificNumberFormat,
       rangePadding: ChartRangePadding.none,
       title: AxisTitle(text: trimmedTitle),
     );
@@ -1100,34 +1045,59 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     final minValue = range.minimum!;
     final maxValue = range.maximum!;
     final valueSpan = maxValue - minValue;
-    final anchor = math.max(
+    final referenceMagnitude = math.max(
       math.max(minValue.abs(), maxValue.abs()),
-      1e-9,
+      1e-12,
     );
-    final padding = valueSpan == 0
-        ? anchor * 1e-4
-        : math.max(valueSpan * 0.08, anchor * 1e-6);
-    final axisMinimum = minValue - padding;
-    final axisMaximum = maxValue + padding;
+    final relativeSpan = valueSpan / referenceMagnitude;
+    final halfRange = valueSpan == 0
+        ? _niceStep(referenceMagnitude * 0.02)
+        : relativeSpan < 1e-4
+            ? math.max(
+                valueSpan * 0.6,
+                _niceStep(referenceMagnitude * 0.02),
+              )
+            : math.max(valueSpan * 0.08, _niceStep(valueSpan * 0.02));
+    final paddedMinimum = minValue - halfRange;
+    final paddedMaximum = maxValue + halfRange;
+    final interval = _niceStep((paddedMaximum - paddedMinimum) / 5);
+    final axisMinimum = (paddedMinimum / interval).floorToDouble() * interval;
+    final axisMaximum = (paddedMaximum / interval).ceilToDouble() * interval;
 
     return _YAxisConfig(
       title: title,
       minimum: axisMinimum,
       maximum: axisMaximum,
-      decimalPlaces: _decimalPlacesForSpan(axisMaximum - axisMinimum),
+      interval: interval,
+      decimalPlaces: _decimalPlacesForInterval(interval),
     );
   }
 
-  int _decimalPlacesForSpan(double span) {
-    if (!span.isFinite || span <= 0) {
+  int _decimalPlacesForInterval(double interval) {
+    if (!interval.isFinite || interval <= 0) {
       return 3;
     }
-    final labelStep = span / 5;
-    if (labelStep >= 1) {
+    if (interval >= 1) {
       return 0;
     }
-    final decimals = (-math.log(labelStep) / math.ln10).ceil();
-    return math.max(0, math.min(8, decimals));
+    final decimals = (-math.log(interval) / math.ln10).ceil();
+    return math.max(0, math.min(12, decimals));
+  }
+
+  double _niceStep(double value) {
+    if (!value.isFinite || value <= 0) {
+      return 1;
+    }
+    final exponent = math.pow(10, (math.log(value) / math.ln10).floor());
+    final fraction = value / exponent;
+    final niceFraction = fraction <= 1
+        ? 1.0
+        : fraction <= 2
+            ? 2.0
+            : fraction <= 5
+                ? 5.0
+                : 10.0;
+    return niceFraction * exponent;
   }
 
   String _compactChartTitle(String title) {
@@ -1186,12 +1156,14 @@ class _YAxisConfig {
     required this.title,
     this.minimum,
     this.maximum,
+    this.interval,
     required this.decimalPlaces,
   });
 
   final String title;
   final double? minimum;
   final double? maximum;
+  final double? interval;
   final int decimalPlaces;
 }
 

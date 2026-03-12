@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dataviewer/features/channel_selection/presentation/channel_selection_providers.dart';
 import 'package:dataviewer/shared/models/channel_models.dart';
 import 'package:dataviewer/shared/models/plot_view_request.dart';
@@ -15,6 +17,7 @@ class ChannelSelectionScreen extends ConsumerStatefulWidget {
 
 class _ChannelSelectionScreenState
     extends ConsumerState<ChannelSelectionScreen> {
+  static const int _maxCategoryLoadAttempts = 4;
   static const Map<String, Duration> _presetDurations = <String, Duration>{
     '30 mn': Duration(minutes: 30),
     '1 h': Duration(hours: 1),
@@ -34,6 +37,8 @@ class _ChannelSelectionScreenState
   String? _error;
   String? _selectedCategory;
   String _selectedPreset = '1 h';
+  int _categoryLoadAttempts = 0;
+  Timer? _categoryRetryTimer;
   DateTime _customStartLocal =
       DateTime.now().subtract(const Duration(hours: 1));
 
@@ -46,11 +51,15 @@ class _ChannelSelectionScreenState
 
   @override
   void dispose() {
+    _categoryRetryTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
 
   Future<void> _loadCategories() async {
+    if (_isLoadingCategories) {
+      return;
+    }
     setState(() {
       _isLoadingCategories = true;
     });
@@ -63,14 +72,16 @@ class _ChannelSelectionScreenState
       }
       setState(() {
         _categories = categories;
+        _categoryLoadAttempts = categories.isEmpty ? _categoryLoadAttempts : 0;
       });
+      if (categories.isEmpty) {
+        _scheduleCategoryRetry();
+      }
     } catch (_) {
       if (!mounted) {
         return;
       }
-      setState(() {
-        _categories = const <ChannelCategory>[];
-      });
+      _scheduleCategoryRetry();
     } finally {
       if (mounted) {
         setState(() {
@@ -99,6 +110,9 @@ class _ChannelSelectionScreenState
       setState(() {
         _results = result.items;
       });
+      if (_categories.isEmpty && !_isLoadingCategories) {
+        unawaited(_loadCategories());
+      }
     } catch (error) {
       if (!mounted) {
         return;
@@ -178,7 +192,28 @@ class _ChannelSelectionScreenState
   }
 
   void _openFiltersPanel() {
+    if (_categories.isEmpty && !_isLoadingCategories) {
+      unawaited(_loadCategories());
+    }
     _scaffoldKey.currentState?.openEndDrawer();
+  }
+
+  void _scheduleCategoryRetry() {
+    if (!mounted || _categories.isNotEmpty) {
+      return;
+    }
+    if (_categoryLoadAttempts >= _maxCategoryLoadAttempts) {
+      return;
+    }
+    _categoryRetryTimer?.cancel();
+    _categoryLoadAttempts += 1;
+    final delaySeconds = _categoryLoadAttempts == 1 ? 2 : 4;
+    _categoryRetryTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!mounted || _isLoadingCategories || _categories.isNotEmpty) {
+        return;
+      }
+      unawaited(_loadCategories());
+    });
   }
 
   @override
