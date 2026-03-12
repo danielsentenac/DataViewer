@@ -25,12 +25,17 @@ The app stays intentionally simple:
 
 - [docs/frontend_architecture.md](docs/frontend_architecture.md)
 - [docs/api_contracts.md](docs/api_contracts.md)
+- [docs/build_android_apk.md](docs/build_android_apk.md)
 
 ## Repository layout
 
 - `tomcat-json-adapter/`: Java DTOs for the compact JSON contract used by Tomcat
 - `flutter_app/`: Flutter scaffold with compact payload models and HTTP repositories
 - `scripts/`: local wrappers for the repo-managed Flutter SDK
+
+## Build APK
+
+See [docs/build_android_apk.md](docs/build_android_apk.md).
 
 ## Important integration rule
 
