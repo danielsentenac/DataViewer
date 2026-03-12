@@ -109,7 +109,7 @@ Exact Tomcat deployment steps:
    install -m 755 tomcat-json-adapter/build/native/libvirgo_frame_jni.so \
       /opt/dataviewer/lib/libvirgo_frame_jni.so
    ```
-5. Install a Tomcat context file from [dataviewer-context.xml.example](/home/sentenac/DATAVIEWER/tomcat-json-adapter/deploy/dataviewer-context.xml.example):
+5. Install a Tomcat context file from [dataviewer-context.xml.example](deploy/dataviewer-context.xml.example):
    ```bash
    cp tomcat-json-adapter/deploy/dataviewer-context.xml.example \
       "$CATALINA_BASE/conf/Catalina/localhost/dataviewer.xml"

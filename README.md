@@ -23,8 +23,8 @@ The app stays intentionally simple:
 
 ## Documents
 
-- [docs/frontend_architecture.md](/home/sentenac/DATAVIEWER/docs/frontend_architecture.md)
-- [docs/api_contracts.md](/home/sentenac/DATAVIEWER/docs/api_contracts.md)
+- [docs/frontend_architecture.md](docs/frontend_architecture.md)
+- [docs/api_contracts.md](docs/api_contracts.md)
 
 ## Repository layout
 
