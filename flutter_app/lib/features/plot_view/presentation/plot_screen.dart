@@ -36,13 +36,15 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   final Map<String, SplayTreeMap<int, double?>> _deferredLiveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
-  final DateFormat _localTimeAxisFormat = DateFormat('HH:mm');
+  final DateFormat _localTimeMinutesFormat = DateFormat('HH:mm');
+  final DateFormat _localTimeSecondsFormat = DateFormat('HH:mm:ss');
 
   PlotQueryResponse? _response;
   Timer? _liveTimer;
   bool _isLoading = false;
   bool _isPollingLive = false;
   bool _isChartInteractionActive = false;
+  bool _showSecondsOnXAxis = false;
   bool _overlayCharts = false;
   bool _logScale = false;
   String? _error;
@@ -87,6 +89,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _deferredLastLiveAfterUtcMs = null;
       _deferredLiveError = null;
       _isChartInteractionActive = false;
+      _showSecondsOnXAxis = false;
       _liveValuesByChannel.clear();
       _deferredLiveValuesByChannel.clear();
     });
@@ -201,6 +204,38 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }
     _isChartInteractionActive = false;
     _flushDeferredLiveUpdate();
+  }
+
+  void _handleActualRangeChanged(ActualRangeChangedArgs args) {
+    if (args.orientation != AxisOrientation.horizontal) {
+      return;
+    }
+
+    final visibleMin = _asDateTime(args.visibleMin);
+    final visibleMax = _asDateTime(args.visibleMax);
+    if (visibleMin == null || visibleMax == null) {
+      return;
+    }
+
+    final shouldShowSeconds =
+        visibleMax.difference(visibleMin).abs() <= const Duration(minutes: 10);
+    if (shouldShowSeconds == _showSecondsOnXAxis || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _showSecondsOnXAxis = shouldShowSeconds;
+    });
+  }
+
+  DateTime? _asDateTime(dynamic value) {
+    if (value is DateTime) {
+      return value;
+    }
+    if (value is num) {
+      return DateTime.fromMillisecondsSinceEpoch(value.round());
+    }
+    return null;
   }
 
   @override
@@ -770,9 +805,12 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             onChartTouchInteractionDown: (_) => _beginChartInteraction(),
             onChartTouchInteractionMove: (_) => _beginChartInteraction(),
             onChartTouchInteractionUp: (_) => _endChartInteraction(),
+            onActualRangeChanged: _handleActualRangeChanged,
             primaryXAxis: DateTimeAxis(
               title: const AxisTitle(text: 'Local time'),
-              dateFormat: _localTimeAxisFormat,
+              dateFormat: _showSecondsOnXAxis
+                  ? _localTimeSecondsFormat
+                  : _localTimeMinutesFormat,
               edgeLabelPlacement: EdgeLabelPlacement.shift,
               labelIntersectAction: AxisLabelIntersectAction.rotate45,
               maximumLabels: 6,
