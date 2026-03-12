@@ -1,4 +1,4 @@
-# DATAVIEWER
+# DataViewer
 
 Mobile frontend for browsing and plotting Virgo channel data.
 

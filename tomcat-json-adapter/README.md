@@ -1,6 +1,6 @@
 # Tomcat JSON Adapter
 
-This module contains the mobile-facing Tomcat adapter for `DATAVIEWER`.
+This module contains the mobile-facing Tomcat adapter for `DataViewer`.
 
 ## What is here
 
