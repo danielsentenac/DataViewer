@@ -76,7 +76,7 @@ Build the JNI shared library from the existing Frame sources with:
 ```
 
 By default that script:
-- reads Frame sources from `/home/sentenac/TOMCAT/Fr`
+- reads Frame sources from `/path/to/TOMCAT/Fr`
 - writes the shared library to `tomcat-json-adapter/build/native/libvirgo_frame_jni.so`
 
 Package the WAR with:
