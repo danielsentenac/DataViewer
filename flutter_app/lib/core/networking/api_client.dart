@@ -4,16 +4,16 @@ import 'package:dio/dio.dart';
 
 class ApiClient {
   ApiClient(AppConfig config)
-    : _dio = Dio(
-        BaseOptions(
-          baseUrl: config.baseUrl,
-          connectTimeout: config.connectTimeout,
-          receiveTimeout: config.receiveTimeout,
-          contentType: 'application/json',
-          responseType: ResponseType.json,
-          headers: const <String, String>{'accept-encoding': 'gzip'},
-        ),
-      );
+      : _dio = Dio(
+          BaseOptions(
+            baseUrl: _normalizeBaseUrl(config.baseUrl),
+            connectTimeout: config.connectTimeout,
+            receiveTimeout: config.receiveTimeout,
+            contentType: 'application/json',
+            responseType: ResponseType.json,
+            headers: const <String, String>{'accept-encoding': 'gzip'},
+          ),
+        );
 
   final Dio _dio;
 
@@ -23,7 +23,7 @@ class ApiClient {
   }) async {
     try {
       final response = await _dio.get<Object?>(
-        path,
+        _normalizePath(path),
         queryParameters: _compactMap(queryParameters),
       );
       return _expectMap(response.data, path);
@@ -37,7 +37,8 @@ class ApiClient {
     required Map<String, dynamic> data,
   }) async {
     try {
-      final response = await _dio.post<Object?>(path, data: data);
+      final response =
+          await _dio.post<Object?>(_normalizePath(path), data: data);
       return _expectMap(response.data, path);
     } on DioException catch (error) {
       throw _mapDioException(error, path);
@@ -68,6 +69,14 @@ class ApiClient {
     return Map<String, dynamic>.fromEntries(
       value.entries.where((entry) => entry.value != null),
     );
+  }
+
+  static String _normalizeBaseUrl(String value) {
+    return value.endsWith('/') ? value : '$value/';
+  }
+
+  static String _normalizePath(String value) {
+    return value.startsWith('/') ? value.substring(1) : value;
   }
 
   ApiException _mapDioException(DioException error, String path) {
