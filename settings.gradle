@@ -1,0 +1,3 @@
+rootProject.name = 'DATAVIEWER'
+
+include 'tomcat-json-adapter'

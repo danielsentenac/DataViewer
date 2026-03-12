@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="http://xmlns.jcp.org/xml/ns/javaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://xmlns.jcp.org/xml/ns/javaee http://xmlns.jcp.org/xml/ns/javaee/web-app_3_1.xsd"
+         version="3.1">
+    <display-name>DATAVIEWER Tomcat JSON Adapter</display-name>
+
+    <context-param>
+        <param-name>virgo.trend.ffl</param-name>
+        <param-value>/virgoData/ffl/trend.ffl</param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.history.backend</param-name>
+        <param-value>jni</param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.frame.jni.library</param-name>
+        <param-value>virgo_frame_jni</param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.frame.jni.path</param-name>
+        <param-value></param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.live.buffer.minutes</param-name>
+        <param-value>5</param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.live.poll.ms</param-name>
+        <param-value>1000</param-value>
+    </context-param>
+    <context-param>
+        <param-name>zcmsubendpoint</param-name>
+        <param-value>tcp://olserver38.virgo.infn.it:3333</param-value>
+    </context-param>
+    <context-param>
+        <param-name>zcmgpschannel</param-name>
+        <param-value>GPS</param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.channel.catalog.search.url</param-name>
+        <param-value></param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.channel.catalog.categories.url</param-name>
+        <param-value></param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.channel.catalog.list.url</param-name>
+        <param-value></param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.channel.catalog.timeout.ms</param-name>
+        <param-value>5000</param-value>
+    </context-param>
+    <context-param>
+        <param-name>virgo.channel.catalog.cache.seconds</param-name>
+        <param-value>60</param-value>
+    </context-param>
+
+    <listener>
+        <listener-class>org.virgo.dataviewer.backend.servlet.VirgoBackendBootstrap</listener-class>
+    </listener>
+</web-app>

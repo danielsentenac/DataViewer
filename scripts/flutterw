@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export HOME="$ROOT_DIR/.home"
+export XDG_CONFIG_HOME="$ROOT_DIR/.home/.config"
+export PUB_CACHE="$ROOT_DIR/.pub-cache"
+
+mkdir -p "$HOME/.config" "$PUB_CACHE"
+
+exec "$ROOT_DIR/.tooling/flutter/bin/flutter" "$@"

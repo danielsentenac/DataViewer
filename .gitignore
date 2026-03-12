@@ -1,0 +1,11 @@
+.tooling/
+.home/
+.pub-cache/
+
+flutter_app/.dart_tool/
+flutter_app/.flutter-plugins
+flutter_app/.flutter-plugins-dependencies
+flutter_app/.packages
+flutter_app/build/
+tomcat-json-adapter/build/
+.gradle/
