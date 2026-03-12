@@ -145,18 +145,6 @@ Exact Tomcat deployment steps:
    curl "http://localhost:8080/dataviewer/api/v1/diagnostics/live-catalog"
    ```
 
-For the current Virgo deployment target on `olserver134.virgo.infn.it`, use the repo script instead:
-
-```bash
-SSHPASS='<password>' ./scripts/deploy_backend_olserver134.sh
-```
-
-That script:
-- packages the WAR with [dataviewer-context.olserver134.xml](deploy/dataviewer-context.olserver134.xml)
-- builds the JNI library on `olserver134`
-- patches the deployed WAR with the existing `jchv.jar` so `org.zeromq.ZMQ` is available
-- verifies `GET /dataviewer/api/v1/diagnostics/live-catalog`
-
 Only set `virgo.channel.catalog.*` in the context file if you want to override the default live catalog coming from `zJChv`.
 
 The live catalog diagnostic endpoint returns:

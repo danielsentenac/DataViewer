@@ -1,9 +1,0 @@
-<Context docBase="/virgoDev/TomcatApp/v0r1p3/3/webapps/dataviewer.war">
-    <Parameter name="virgo.trend.ffl" value="/virgoData/ffl/trend.ffl" override="false"/>
-    <Parameter name="virgo.history.backend" value="jni" override="false"/>
-    <Parameter name="virgo.frame.jni.path" value="/virgoDev/TomcatApp/v0r1p3/3/lib/libvirgo_frame_jni.so" override="false"/>
-    <Parameter name="zcmsubendpoint" value="tcp://olserver38.virgo.infn.it:3333" override="false"/>
-    <Parameter name="zcmgpschannel" value="GPS" override="false"/>
-    <Parameter name="virgo.live.buffer.minutes" value="5" override="false"/>
-    <Parameter name="virgo.live.poll.ms" value="1000" override="false"/>
-</Context>
