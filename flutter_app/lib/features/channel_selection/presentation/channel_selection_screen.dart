@@ -18,6 +18,7 @@ class ChannelSelectionScreen extends ConsumerStatefulWidget {
 class _ChannelSelectionScreenState
     extends ConsumerState<ChannelSelectionScreen> {
   static const int _maxCategoryLoadAttempts = 4;
+  static const double _headerCompressOffset = 24;
   static const Map<String, Duration> _presetDurations = <String, Duration>{
     '30 mn': Duration(minutes: 30),
     '1 h': Duration(hours: 1),
@@ -29,13 +30,21 @@ class _ChannelSelectionScreenState
     text: 'V1:*',
   );
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final ScrollController _selectedChannelsScrollController = ScrollController();
+  final ScrollController _availableChannelsScrollController =
+      ScrollController();
   final Set<String> _selectedChannels = <String>{};
   List<ChannelSummary> _results = const <ChannelSummary>[];
   List<ChannelCategory> _categories = const <ChannelCategory>[];
+  List<SavedChannelCategory> _savedCategories = const <SavedChannelCategory>[];
+  bool _isFiltersHeaderCompact = false;
+  bool _isSelectionHeaderCompact = false;
   bool _isLoading = false;
   bool _isLoadingCategories = false;
+  bool _isLoadingSavedCategories = false;
   String? _error;
   String? _selectedCategory;
+  String? _selectedSavedCategoryId;
   String _selectedPreset = '1 h';
   int _categoryLoadAttempts = 0;
   Timer? _categoryRetryTimer;
@@ -45,15 +54,50 @@ class _ChannelSelectionScreenState
   @override
   void initState() {
     super.initState();
+    _selectedChannelsScrollController.addListener(
+      _handleSelectedChannelsScroll,
+    );
+    _availableChannelsScrollController.addListener(
+      _handleAvailableChannelsScroll,
+    );
     _loadCategories();
+    _loadSavedCategories();
     _runSearch();
   }
 
   @override
   void dispose() {
     _categoryRetryTimer?.cancel();
+    _selectedChannelsScrollController
+      ..removeListener(_handleSelectedChannelsScroll)
+      ..dispose();
+    _availableChannelsScrollController
+      ..removeListener(_handleAvailableChannelsScroll)
+      ..dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _handleSelectedChannelsScroll() {
+    final shouldCompress = _selectedChannelsScrollController.hasClients &&
+        _selectedChannelsScrollController.offset > _headerCompressOffset;
+    if (shouldCompress == _isSelectionHeaderCompact || !mounted) {
+      return;
+    }
+    setState(() {
+      _isSelectionHeaderCompact = shouldCompress;
+    });
+  }
+
+  void _handleAvailableChannelsScroll() {
+    final shouldCompress = _availableChannelsScrollController.hasClients &&
+        _availableChannelsScrollController.offset > _headerCompressOffset;
+    if (shouldCompress == _isFiltersHeaderCompact || !mounted) {
+      return;
+    }
+    setState(() {
+      _isFiltersHeaderCompact = shouldCompress;
+    });
   }
 
   Future<void> _loadCategories() async {
@@ -86,6 +130,39 @@ class _ChannelSelectionScreenState
       if (mounted) {
         setState(() {
           _isLoadingCategories = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadSavedCategories({String? selectedCategoryId}) async {
+    if (_isLoadingSavedCategories) {
+      return;
+    }
+    setState(() {
+      _isLoadingSavedCategories = true;
+    });
+
+    try {
+      final repository = ref.read(savedChannelCategoryRepositoryProvider);
+      final categories = await repository.fetchSavedCategories();
+      if (!mounted) {
+        return;
+      }
+      final nextSelectedId = selectedCategoryId ?? _selectedSavedCategoryId;
+      final resolvedSelectedId = categories.any(
+        (SavedChannelCategory category) => category.id == nextSelectedId,
+      )
+          ? nextSelectedId
+          : null;
+      setState(() {
+        _savedCategories = categories;
+        _selectedSavedCategoryId = resolvedSelectedId;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingSavedCategories = false;
         });
       }
     }
@@ -198,6 +275,191 @@ class _ChannelSelectionScreenState
     _scaffoldKey.currentState?.openEndDrawer();
   }
 
+  Future<void> _saveCurrentSelectionAsCategory() async {
+    if (_selectedChannels.isEmpty) {
+      return;
+    }
+
+    final controller = TextEditingController();
+    try {
+      final label = await showDialog<String>(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: const Text('Save as category'),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              textInputAction: TextInputAction.done,
+              decoration: const InputDecoration(
+                labelText: 'Category name',
+                hintText: 'Example: Lock acquisition',
+              ),
+              onSubmitted: (String value) {
+                final normalizedValue = value.trim();
+                if (normalizedValue.isEmpty) {
+                  return;
+                }
+                Navigator.of(context).pop(normalizedValue);
+              },
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final normalizedValue = controller.text.trim();
+                  if (normalizedValue.isEmpty) {
+                    return;
+                  }
+                  Navigator.of(context).pop(normalizedValue);
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted || label == null) {
+        return;
+      }
+
+      final repository = ref.read(savedChannelCategoryRepositoryProvider);
+      final channelNames = _selectedChannels.toList()..sort();
+      final category = await repository.saveCategory(
+        label: label,
+        channelNames: channelNames,
+      );
+      if (!mounted) {
+        return;
+      }
+
+      await _loadSavedCategories(selectedCategoryId: category.id);
+      if (!mounted) {
+        return;
+      }
+      _showMessage('Saved "${category.label}" (${category.count} channels).');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage(_normalizeErrorMessage(error));
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Future<void> _loadSavedCategorySelection() async {
+    final category = _selectedSavedCategory;
+    if (category == null) {
+      return;
+    }
+
+    if (_selectedChannels.isNotEmpty &&
+        !_hasSameChannelSelection(category.channelNames)) {
+      final shouldReplace = await showDialog<bool>(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: const Text('Replace current selection?'),
+            content: Text(
+              'Load "${category.label}" and replace the current '
+              '${_selectedChannels.length}-channel selection?',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Replace'),
+              ),
+            ],
+          );
+        },
+      );
+      if (!mounted || shouldReplace != true) {
+        return;
+      }
+    }
+
+    setState(() {
+      _selectedChannels
+        ..clear()
+        ..addAll(category.channelNames);
+    });
+    _showMessage('Loaded "${category.label}" (${category.count} channels).');
+  }
+
+  Future<void> _deleteSavedCategory() async {
+    final category = _selectedSavedCategory;
+    if (category == null) {
+      return;
+    }
+
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Delete saved category?'),
+          content: Text(
+            'Delete "${category.label}" from the saved categories list?',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || shouldDelete != true) {
+      return;
+    }
+
+    final repository = ref.read(savedChannelCategoryRepositoryProvider);
+    await repository.deleteCategory(category.id);
+    if (!mounted) {
+      return;
+    }
+    await _loadSavedCategories();
+    if (!mounted) {
+      return;
+    }
+    _showMessage('Deleted "${category.label}".');
+  }
+
+  void _selectAllVisibleChannels() {
+    if (_results.isEmpty) {
+      return;
+    }
+    setState(() {
+      for (final ChannelSummary channel in _results) {
+        _selectedChannels.add(channel.name);
+      }
+    });
+  }
+
+  void _unselectAllVisibleChannels() {
+    if (_results.isEmpty) {
+      return;
+    }
+    setState(() {
+      for (final ChannelSummary channel in _results) {
+        _selectedChannels.remove(channel.name);
+      }
+    });
+  }
+
   void _scheduleCategoryRetry() {
     if (!mounted || _categories.isNotEmpty) {
       return;
@@ -260,7 +522,7 @@ class _ChannelSelectionScreenState
                         theme,
                         startLocal,
                         selectedChannels,
-                        showFiltersButton: false,
+                        isWideLayout: true,
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -274,7 +536,7 @@ class _ChannelSelectionScreenState
                   theme,
                   startLocal,
                   selectedChannels,
-                  showFiltersButton: true,
+                  isWideLayout: false,
                 ),
         ),
       ),
@@ -285,66 +547,81 @@ class _ChannelSelectionScreenState
     ThemeData theme,
     DateTime startLocal,
     List<String> selectedChannels, {
-    required bool showFiltersButton,
+    required bool isWideLayout,
   }) {
+    final isCompact = _isSelectionHeaderCompact && selectedChannels.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  'Selected channels',
-                  style: theme.textTheme.titleLarge,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Build the active query here. Use the Filters panel to search the available channels and add them to this list.',
-                  style: theme.textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: <Widget>[
-                    if (showFiltersButton)
-                      OutlinedButton.icon(
-                        onPressed: _openFiltersPanel,
-                        icon: const Icon(Icons.tune),
-                        label: const Text('Filters'),
-                      ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          child: Card(
+            child: Padding(
+              padding: EdgeInsets.all(isCompact ? 12 : 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  if (isCompact)
+                    Row(
+                      children: <Widget>[
+                        Expanded(
+                          child: Text(
+                            'Selected channels',
+                            style: theme.textTheme.titleLarge,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        FilledButton.tonal(
+                          onPressed:
+                              _selectedChannels.isEmpty ? null : _openPlots,
+                          child: const Text('Open plots'),
+                        ),
+                      ],
+                    )
+                  else ...<Widget>[
+                    Text(
+                      'Selected channels',
+                      style: theme.textTheme.titleLarge,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Build the active query here. Use the Filters panel to search the available channels and add them to this list.',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 12),
                     FilledButton.tonal(
                       onPressed: _selectedChannels.isEmpty ? null : _openPlots,
                       child: const Text('Open plots'),
                     ),
                   ],
-                ),
-                const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: <Widget>[
-                    _summaryChip(theme, '${selectedChannels.length} selected'),
-                    _summaryChip(
-                      theme,
-                      _selectedPreset == 'Custom'
-                          ? 'Start ${_compactStartLabel(startLocal)}'
-                          : 'Start $_selectedPreset ago',
-                    ),
-                    _summaryChip(
-                      theme,
-                      _selectedCategory == null
-                          ? 'All categories'
-                          : _selectedCategory!,
-                    ),
-                  ],
-                ),
-              ],
+                  SizedBox(height: isCompact ? 8 : 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: <Widget>[
+                      _summaryChip(
+                          theme, '${selectedChannels.length} selected'),
+                      _summaryChip(
+                        theme,
+                        _selectedPreset == 'Custom'
+                            ? 'Start ${_compactStartLabel(startLocal)}'
+                            : 'Start $_selectedPreset ago',
+                      ),
+                      _summaryChip(
+                        theme,
+                        _selectedCategory == null
+                            ? 'All categories'
+                            : _selectedCategory!,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -367,15 +644,16 @@ class _ChannelSelectionScreenState
                     child: Padding(
                       padding: const EdgeInsets.all(24),
                       child: Text(
-                        showFiltersButton
-                            ? 'No channels selected yet. Open Filters to choose channels.'
-                            : 'No channels selected yet. Use the panel on the right to choose channels.',
+                        isWideLayout
+                            ? 'No channels selected yet. Use the panel on the right to choose channels.'
+                            : 'No channels selected yet. Use the Filters icon to choose channels.',
                         style: theme.textTheme.titleMedium,
                         textAlign: TextAlign.center,
                       ),
                     ),
                   )
                 : ListView.separated(
+                    controller: _selectedChannelsScrollController,
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     itemCount: selectedChannels.length,
                     separatorBuilder: (BuildContext context, int index) {
@@ -417,109 +695,86 @@ class _ChannelSelectionScreenState
     DateTime startLocal, {
     bool showDrawerHeading = false,
   }) {
+    final isCompact = _isFiltersHeaderCompact && _results.isNotEmpty;
     final content = Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Text(
-            'Filters',
-            style: theme.textTheme.titleLarge,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Search channels, choose the subsystem and start time, then tick the channels to add them to the main selection.',
-            style: theme.textTheme.bodyMedium,
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _searchController,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => _runSearch(),
-                  decoration: const InputDecoration(
-                    hintText: 'Example: V1:* or V1:TCS*',
-                    prefixIcon: Icon(Icons.search),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              FilledButton(
-                onPressed: _isLoading ? null : _runSearch,
-                child: const Text('Search'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            key: ValueKey<String?>(_selectedCategory),
-            initialValue: _selectedCategory,
-            isExpanded: true,
-            decoration: InputDecoration(
-              labelText: _isLoadingCategories
-                  ? 'Loading categories'
-                  : 'Subsystem category',
-            ),
-            items: <DropdownMenuItem<String>>[
-              const DropdownMenuItem<String>(
-                value: null,
-                child: Text('All categories'),
-              ),
-              ..._categories.map((ChannelCategory category) {
-                return DropdownMenuItem<String>(
-                  value: category.id,
-                  child: Text('${category.label} (${category.count})'),
-                );
-              }),
-            ],
-            onChanged: _isLoadingCategories
-                ? null
-                : (String? value) {
-                    setState(() {
-                      _selectedCategory = value;
-                    });
-                    _runSearch();
-                  },
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            height: 44,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
+          AnimatedSize(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                ..._presetDurations.keys.map((String preset) {
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: ChoiceChip(
-                      label: Text(preset),
-                      selected: preset == _selectedPreset,
-                      onSelected: (_) {
-                        setState(() {
-                          _selectedPreset = preset;
-                        });
-                      },
-                    ),
-                  );
-                }),
-                ChoiceChip(
-                  label: const Text('Custom'),
-                  selected: _selectedPreset == 'Custom',
-                  onSelected: (_) => _pickCustomStart(),
+                Text(
+                  'Filters',
+                  style: theme.textTheme.titleLarge,
                 ),
+                if (!isCompact) ...<Widget>[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Search channels, choose the subsystem and start time, then tick the channels to add them to the main selection.',
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ],
+                SizedBox(height: isCompact ? 12 : 16),
+                _buildFilterSearchRow(),
+                const SizedBox(height: 12),
+                _buildCategoryDropdown(),
+                if (isCompact) ...<Widget>[
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: <Widget>[
+                      _summaryChip(
+                        theme,
+                        _selectedPreset == 'Custom'
+                            ? 'Start ${_compactStartLabel(startLocal)}'
+                            : 'Start $_selectedPreset ago',
+                      ),
+                      _summaryChip(
+                        theme,
+                        _selectedCategory == null
+                            ? 'All categories'
+                            : _selectedCategory!,
+                      ),
+                      _summaryChip(
+                        theme,
+                        '${_selectedChannels.length} selected',
+                      ),
+                    ],
+                  ),
+                ] else ...<Widget>[
+                  const SizedBox(height: 16),
+                  _buildSavedCategoriesSection(theme),
+                  const SizedBox(height: 16),
+                  _buildStartTimeSection(theme, startLocal),
+                ],
               ],
             ),
           ),
-          const SizedBox(height: 12),
-          Text(
-            'Start: ${_resolveStartLabel(startLocal)}',
-            style: theme.textTheme.bodyMedium,
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'Available channels',
-            style: theme.textTheme.titleMedium,
+          SizedBox(height: isCompact ? 12 : 16),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  'Available channels',
+                  style: theme.textTheme.titleMedium,
+                ),
+              ),
+              TextButton(
+                onPressed: _results.isEmpty ? null : _selectAllVisibleChannels,
+                child: const Text('Select all'),
+              ),
+              TextButton(
+                onPressed: _visibleSelectedChannelCount == 0
+                    ? null
+                    : _unselectAllVisibleChannels,
+                child: const Text('Unselect all'),
+              ),
+            ],
           ),
           const SizedBox(height: 8),
           Expanded(
@@ -537,6 +792,7 @@ class _ChannelSelectionScreenState
                           ),
                         )
                       : ListView.separated(
+                          controller: _availableChannelsScrollController,
                           padding: const EdgeInsets.symmetric(vertical: 8),
                           itemCount: _results.length,
                           separatorBuilder: (BuildContext context, int index) {
@@ -561,8 +817,7 @@ class _ChannelSelectionScreenState
                               title: Text(channel.name),
                               subtitle: Text(_channelSubtitle(channel)),
                               dense: true,
-                              controlAffinity:
-                                  ListTileControlAffinity.leading,
+                              controlAffinity: ListTileControlAffinity.leading,
                             );
                           },
                         ),
@@ -577,6 +832,181 @@ class _ChannelSelectionScreenState
     }
 
     return Card(child: content);
+  }
+
+  Widget _buildFilterSearchRow() {
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: TextField(
+            controller: _searchController,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (_) => _runSearch(),
+            decoration: const InputDecoration(
+              hintText: 'Example: V1:* or V1:TCS*',
+              prefixIcon: Icon(Icons.search),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        FilledButton(
+          onPressed: _isLoading ? null : _runSearch,
+          child: const Text('Search'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCategoryDropdown() {
+    return DropdownButtonFormField<String>(
+      key: ValueKey<String?>(_selectedCategory),
+      initialValue: _selectedCategory,
+      isExpanded: true,
+      decoration: InputDecoration(
+        labelText:
+            _isLoadingCategories ? 'Loading categories' : 'Subsystem category',
+      ),
+      items: <DropdownMenuItem<String>>[
+        const DropdownMenuItem<String>(
+          value: null,
+          child: Text('All categories'),
+        ),
+        ..._categories.map((ChannelCategory category) {
+          return DropdownMenuItem<String>(
+            value: category.id,
+            child: Text('${category.label} (${category.count})'),
+          );
+        }),
+      ],
+      onChanged: _isLoadingCategories
+          ? null
+          : (String? value) {
+              setState(() {
+                _selectedCategory = value;
+              });
+              _runSearch();
+            },
+    );
+  }
+
+  Widget _buildSavedCategoriesSection(ThemeData theme) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: <Widget>[
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                key: ValueKey<String?>(_selectedSavedCategoryId),
+                initialValue: _selectedSavedCategoryId,
+                isExpanded: true,
+                decoration: InputDecoration(
+                  labelText: _isLoadingSavedCategories
+                      ? 'Loading saved categories'
+                      : 'Saved categories',
+                ),
+                items: <DropdownMenuItem<String>>[
+                  const DropdownMenuItem<String>(
+                    value: null,
+                    child: Text('Select a saved category'),
+                  ),
+                  ..._savedCategories.map((SavedChannelCategory category) {
+                    return DropdownMenuItem<String>(
+                      value: category.id,
+                      child: Text('${category.label} (${category.count})'),
+                    );
+                  }),
+                ],
+                onChanged: _isLoadingSavedCategories
+                    ? null
+                    : (String? value) {
+                        setState(() {
+                          _selectedSavedCategoryId = value;
+                        });
+                      },
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              onPressed:
+                  _selectedSavedCategory == null ? null : _deleteSavedCategory,
+              tooltip: 'Delete saved category',
+              icon: const Icon(Icons.delete_outline),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            FilledButton.tonalIcon(
+              onPressed: _selectedChannels.isEmpty
+                  ? null
+                  : _saveCurrentSelectionAsCategory,
+              icon: const Icon(Icons.bookmark_add_outlined),
+              label: const Text('Save selection'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _selectedSavedCategory == null
+                  ? null
+                  : _loadSavedCategorySelection,
+              icon: const Icon(Icons.download_outlined),
+              label: const Text('Load saved'),
+            ),
+          ],
+        ),
+        if (_savedCategories.isEmpty && !_isLoadingSavedCategories)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(
+              'Save the current channel selection as a named category to reuse it later.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildStartTimeSection(ThemeData theme, DateTime startLocal) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        SizedBox(
+          height: 44,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            children: <Widget>[
+              ..._presetDurations.keys.map((String preset) {
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(preset),
+                    selected: preset == _selectedPreset,
+                    onSelected: (_) {
+                      setState(() {
+                        _selectedPreset = preset;
+                      });
+                    },
+                  ),
+                );
+              }),
+              ChoiceChip(
+                label: const Text('Custom'),
+                selected: _selectedPreset == 'Custom',
+                onSelected: (_) => _pickCustomStart(),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        Text(
+          'Start: ${_resolveStartLabel(startLocal)}',
+          style: theme.textTheme.bodyMedium,
+        ),
+      ],
+    );
   }
 
   ChannelSummary? _findChannelSummary(String channelName) {
@@ -600,6 +1030,49 @@ class _ChannelSelectionScreenState
       return 'Selected for plot query';
     }
     return parts.join('   ');
+  }
+
+  SavedChannelCategory? get _selectedSavedCategory {
+    final selectedSavedCategoryId = _selectedSavedCategoryId;
+    if (selectedSavedCategoryId == null) {
+      return null;
+    }
+    for (final SavedChannelCategory category in _savedCategories) {
+      if (category.id == selectedSavedCategoryId) {
+        return category;
+      }
+    }
+    return null;
+  }
+
+  bool _hasSameChannelSelection(List<String> channelNames) {
+    return _selectedChannels.length == channelNames.length &&
+        _selectedChannels.containsAll(channelNames);
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  static String _normalizeErrorMessage(Object error) {
+    final message = error.toString();
+    const prefix = 'Bad state: ';
+    if (message.startsWith(prefix)) {
+      return message.substring(prefix.length);
+    }
+    return message;
+  }
+
+  int get _visibleSelectedChannelCount {
+    var count = 0;
+    for (final ChannelSummary channel in _results) {
+      if (_selectedChannels.contains(channel.name)) {
+        count += 1;
+      }
+    }
+    return count;
   }
 
   Widget _summaryChip(ThemeData theme, String text) {

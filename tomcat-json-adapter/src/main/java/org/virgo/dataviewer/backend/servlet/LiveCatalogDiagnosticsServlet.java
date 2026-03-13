@@ -16,6 +16,11 @@ import org.virgo.dataviewer.backend.service.VirgoTomcatServices;
 @WebServlet("/api/v1/diagnostics/live-catalog")
 public final class LiveCatalogDiagnosticsServlet extends AbstractJsonServlet {
     @Override
+    protected boolean shouldRegisterSession(HttpServletRequest request) {
+        return false;
+    }
+
+    @Override
     protected void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
         try {
             if (!(services() instanceof VirgoTomcatServices)) {

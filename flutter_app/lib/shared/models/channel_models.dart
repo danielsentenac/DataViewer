@@ -87,3 +87,41 @@ class ChannelSearchResult {
     );
   }
 }
+
+class SavedChannelCategory {
+  const SavedChannelCategory({
+    required this.id,
+    required this.label,
+    required this.channelNames,
+  });
+
+  final String id;
+  final String label;
+  final List<String> channelNames;
+
+  int get count => channelNames.length;
+
+  factory SavedChannelCategory.fromJson(Map<String, dynamic> json) {
+    final channelNames = (json['channelNames'] as List<dynamic>? ??
+            const <dynamic>[])
+        .map((dynamic item) => (item as String? ?? '').trim())
+        .where((String value) => value.isNotEmpty)
+        .toSet()
+        .toList(growable: false)
+      ..sort();
+
+    return SavedChannelCategory(
+      id: json['id'] as String? ?? '',
+      label: json['label'] as String? ?? '',
+      channelNames: channelNames,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'id': id,
+      'label': label,
+      'channelNames': channelNames,
+    };
+  }
+}

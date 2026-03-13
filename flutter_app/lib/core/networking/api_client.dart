@@ -1,10 +1,14 @@
 import 'package:dataviewer/core/config/app_config.dart';
 import 'package:dataviewer/core/networking/api_exception.dart';
+import 'package:dataviewer/core/networking/tomcat_session_store.dart';
 import 'package:dio/dio.dart';
 
 class ApiClient {
-  ApiClient(AppConfig config)
-      : _dio = Dio(
+  ApiClient(
+    AppConfig config, {
+    TomcatSessionStore? sessionStore,
+  })  : _sessionStore = sessionStore,
+        _dio = Dio(
           BaseOptions(
             baseUrl: _normalizeBaseUrl(config.baseUrl),
             connectTimeout: config.connectTimeout,
@@ -13,9 +17,14 @@ class ApiClient {
             responseType: ResponseType.json,
             headers: const <String, String>{'accept-encoding': 'gzip'},
           ),
-        );
+        ) {
+    if (_sessionStore != null) {
+      _dio.interceptors.add(_TomcatSessionInterceptor(_sessionStore));
+    }
+  }
 
   final Dio _dio;
+  final TomcatSessionStore? _sessionStore;
 
   Future<Map<String, dynamic>> getJson(
     String path, {
@@ -93,5 +102,32 @@ class ApiClient {
       statusCode: error.response?.statusCode,
       message: message ?? error.message ?? 'Unknown HTTP failure.',
     );
+  }
+}
+
+class _TomcatSessionInterceptor extends Interceptor {
+  _TomcatSessionInterceptor(this._sessionStore);
+
+  final TomcatSessionStore _sessionStore;
+
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    _sessionStore.applyToRequest(options);
+    handler.next(options);
+  }
+
+  @override
+  void onResponse(
+    Response<dynamic> response,
+    ResponseInterceptorHandler handler,
+  ) {
+    _sessionStore.captureFromResponse(response);
+    handler.next(response);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    _sessionStore.captureFromResponse(err.response);
+    handler.next(err);
   }
 }

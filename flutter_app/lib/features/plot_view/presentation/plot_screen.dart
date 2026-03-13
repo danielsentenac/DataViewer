@@ -20,6 +20,7 @@ class PlotScreen extends ConsumerStatefulWidget {
 }
 
 class _PlotScreenState extends ConsumerState<PlotScreen> {
+  static const double _workspaceCompressOffset = 24;
   static const List<Color> _palette = <Color>[
     Color(0xFF0B6E75),
     Color(0xFFD95D39),
@@ -28,15 +29,14 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     Color(0xFFC97A40),
     Color(0xFF0081A7),
   ];
-  static final NumberFormat _scientificNumberFormat =
-      NumberFormat('0.#####E0');
-  static final NumberFormat _trackballNumberFormat =
-      NumberFormat('0.00E0');
+  static final NumberFormat _scientificNumberFormat = NumberFormat('0.00E0');
+  static final NumberFormat _trackballNumberFormat = NumberFormat('0.00E0');
 
   final Map<String, SplayTreeMap<int, double?>> _liveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
   final Map<String, SplayTreeMap<int, double?>> _deferredLiveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
+  final ScrollController _chartsScrollController = ScrollController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final DateFormat _localTimeMinutesFormat = DateFormat('HH:mm');
   final DateFormat _localTimeSecondsFormat = DateFormat('HH:mm:ss');
@@ -47,6 +47,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   bool _isLoading = false;
   bool _isPollingLive = false;
   bool _isChartInteractionActive = false;
+  bool _isWorkspaceHeaderCompact = false;
   bool _showSecondsOnXAxis = false;
   bool _overlayCharts = false;
   bool _logScale = false;
@@ -61,8 +62,9 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   @override
   void initState() {
     super.initState();
+    _chartsScrollController.addListener(_handleChartsScroll);
+    _overlayCharts = false;
     final request = widget.request;
-    _overlayCharts = request != null && request.channels.length <= 3;
     if (request != null) {
       _loadPlot();
     }
@@ -71,7 +73,21 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   @override
   void dispose() {
     _liveTimer?.cancel();
+    _chartsScrollController
+      ..removeListener(_handleChartsScroll)
+      ..dispose();
     super.dispose();
+  }
+
+  void _handleChartsScroll() {
+    final shouldCompress = _chartsScrollController.hasClients &&
+        _chartsScrollController.offset > _workspaceCompressOffset;
+    if (shouldCompress == _isWorkspaceHeaderCompact || !mounted) {
+      return;
+    }
+    setState(() {
+      _isWorkspaceHeaderCompact = shouldCompress;
+    });
   }
 
   Future<void> _loadPlot() async {
@@ -85,6 +101,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _isLoading = true;
       _error = null;
       _liveError = null;
+      _isWorkspaceHeaderCompact = false;
       _response = null;
       _lastLiveAfterUtcMs = 0;
       _lastServerNowUtcMs = 0;
@@ -319,7 +336,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                         theme,
                         request,
                         charts,
-                        showOptionsButton: false,
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -333,7 +349,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                   theme,
                   request,
                   charts,
-                  showOptionsButton: true,
                 ),
         ),
       ),
@@ -343,9 +358,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   Widget _buildMainPanel(
     ThemeData theme,
     PlotViewRequest request,
-    List<_ChartBundle> charts, {
-    required bool showOptionsButton,
-  }) {
+    List<_ChartBundle> charts,
+  ) {
     final response = _response;
     final historyEnd = response == null
         ? null
@@ -354,81 +368,83 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             isUtc: true,
           ).toLocal();
     final liveNow = _lastServerNowUtcMs <= 0
-      ? null
-      : DateTime.fromMillisecondsSinceEpoch(
-          _lastServerNowUtcMs,
-          isUtc: true,
-        ).toLocal();
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(
+            _lastServerNowUtcMs,
+            isUtc: true,
+          ).toLocal();
     final mixedUnits =
         _overlayCharts && _unitsForChannels(request.channels).length > 1;
+    final isCompact = _isWorkspaceHeaderCompact && charts.isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: Text(
-                        'Plot workspace',
-                        style: theme.textTheme.titleLarge,
+        AnimatedSize(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          child: Card(
+            child: Padding(
+              padding: EdgeInsets.all(isCompact ? 12 : 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          'Plot workspace',
+                          style: theme.textTheme.titleLarge,
+                        ),
                       ),
-                    ),
-                    if (showOptionsButton)
-                      OutlinedButton.icon(
-                        onPressed: _openOptionsPanel,
-                        icon: const Icon(Icons.tune),
-                        label: const Text('Options'),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '${request.channels.length} channel(s) from ${_formatDateTime(request.startLocal)} '
-                  'using ${request.sourceLabel == 'Custom' ? 'a custom local start' : request.sourceLabel} '
-                  '(UTC${request.timeZoneOffsetLabel}).',
-                  style: theme.textTheme.bodyMedium,
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: <Widget>[
-                    _InfoChip(
-                      icon: Icons.history,
-                      label: historyEnd == null
-                          ? 'History pending'
-                          : 'History to ${_formatDateTime(historyEnd)}',
-                      compact: true,
-                    ),
-                    _InfoChip(
-                      icon: Icons.wifi_tethering,
-                      label: liveNow == null
-                          ? 'Live waiting'
-                          : 'Live to ${_formatDateTime(liveNow)}',
-                      compact: true,
-                    ),
-                    _InfoChip(
-                      icon: Icons.bubble_chart,
-                      label: _response == null
-                          ? 'No series yet'
-                          : '${_response!.series.length} history series',
-                      compact: true,
-                    ),
-                    if (mixedUnits)
-                      const _InfoChip(
-                        icon: Icons.straighten,
-                        label: 'Overlay mixes units',
+                    ],
+                  ),
+                  SizedBox(height: isCompact ? 4 : 6),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: <Widget>[
+                      _InfoChip(
+                        icon: Icons.sensors,
+                        label: '${request.channels.length} channel(s)',
                         compact: true,
                       ),
-                  ],
-                ),
-              ],
+                      _InfoChip(
+                        icon: Icons.history_toggle_off,
+                        label: _historyFromLabel(request),
+                        compact: true,
+                      ),
+                      _InfoChip(
+                        icon: Icons.schedule,
+                        label: 'UTC${request.timeZoneOffsetLabel}',
+                        compact: true,
+                      ),
+                      if (!isCompact)
+                        _InfoChip(
+                          icon: Icons.history,
+                          label: historyEnd == null
+                              ? 'History pending'
+                              : 'History to ${_formatDateTime(historyEnd)}',
+                          compact: true,
+                        ),
+                      if (!isCompact)
+                        _InfoChip(
+                          icon: Icons.wifi_tethering,
+                          label: liveNow == null
+                              ? 'Live waiting'
+                              : 'Live to ${_formatDateTime(liveNow)}',
+                          compact: true,
+                        ),
+                      if (mixedUnits)
+                        const _InfoChip(
+                          icon: Icons.straighten,
+                          label: 'Overlay mixes units',
+                          compact: true,
+                        ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -464,6 +480,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                       ),
                     )
                   : ListView.separated(
+                      controller: _chartsScrollController,
                       padding: const EdgeInsets.only(bottom: 16),
                       itemCount: charts.length,
                       separatorBuilder: (BuildContext context, int index) {
@@ -493,12 +510,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         Text(
           'View options',
           style: theme.textTheme.titleLarge,
-        ),
-        const SizedBox(height: 12),
-        FilledButton.icon(
-          onPressed: _isLoading ? null : _loadPlot,
-          icon: const Icon(Icons.refresh),
-          label: const Text('Reload data'),
         ),
         const SizedBox(height: 16),
         Text(
@@ -712,11 +723,9 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       merged[point.utcMs] = point.value;
     }
     return _sanitizeLinePoints(
-      merged.entries
-          .map((MapEntry<int, double?> entry) {
-            return RawPoint(utcMs: entry.key, value: entry.value);
-          })
-          .toList(growable: false),
+      merged.entries.map((MapEntry<int, double?> entry) {
+        return RawPoint(utcMs: entry.key, value: entry.value);
+      }).toList(growable: false),
     );
   }
 
@@ -770,56 +779,78 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     _ChartBundle chart, {
     required int chartCount,
   }) {
-    final titleStyle = Theme.of(context).textTheme.titleSmall?.copyWith(
-          fontSize: 13,
-          fontWeight: FontWeight.w600,
-        );
+    final theme = Theme.of(context);
+    final titleStyle = theme.textTheme.titleSmall?.copyWith(
+      fontSize: 13,
+      fontWeight: FontWeight.w600,
+    );
+    final axisCaption = chart.yAxisConfig.title.trim();
     return Card(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
         child: SizedBox(
           height: _chartHeightFor(chartCount),
-          child: SfCartesianChart(
-            title: ChartTitle(
-              text: _compactChartTitle(chart.title),
-              alignment: ChartAlignment.near,
-              textStyle: titleStyle,
-            ),
-            legend: Legend(
-              isVisible: chart.legendVisible,
-              position: LegendPosition.bottom,
-            ),
-            plotAreaBorderWidth: 0,
-            zoomPanBehavior: ZoomPanBehavior(
-              enablePinching: true,
-              enablePanning: true,
-              enableMouseWheelZooming: true,
-              zoomMode: ZoomMode.x,
-            ),
-            trackballBehavior: TrackballBehavior(
-              enable: true,
-              activationMode: ActivationMode.longPress,
-              tooltipSettings: const InteractiveTooltip(
-                enable: true,
-                canShowMarker: false,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: Text(
+                      _compactChartTitle(chart.title),
+                      style: titleStyle,
+                    ),
+                  ),
+                  if (axisCaption.isNotEmpty)
+                    Text(
+                      axisCaption,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
               ),
-            ),
-            onChartTouchInteractionDown: (_) => _beginChartInteraction(),
-            onChartTouchInteractionMove: (_) => _beginChartInteraction(),
-            onChartTouchInteractionUp: (_) => _endChartInteraction(),
-            onActualRangeChanged: _handleActualRangeChanged,
-            onTrackballPositionChanging: _handleTrackballPositionChanging,
-            primaryXAxis: DateTimeAxis(
-              title: const AxisTitle(text: 'Local time'),
-              dateFormat: _showSecondsOnXAxis
-                  ? _localTimeSecondsFormat
-                  : _localTimeMinutesFormat,
-              edgeLabelPlacement: EdgeLabelPlacement.shift,
-              labelIntersectAction: AxisLabelIntersectAction.rotate45,
-              maximumLabels: 6,
-            ),
-            primaryYAxis: _buildYAxis(chart.yAxisConfig),
-            series: chart.series,
+              const SizedBox(height: 8),
+              Expanded(
+                child: SfCartesianChart(
+                  legend: Legend(
+                    isVisible: chart.legendVisible,
+                    position: LegendPosition.bottom,
+                  ),
+                  plotAreaBorderWidth: 0,
+                  zoomPanBehavior: ZoomPanBehavior(
+                    enablePinching: true,
+                    enablePanning: true,
+                    enableMouseWheelZooming: true,
+                    zoomMode: ZoomMode.x,
+                  ),
+                  trackballBehavior: TrackballBehavior(
+                    enable: true,
+                    activationMode: ActivationMode.longPress,
+                    tooltipSettings: const InteractiveTooltip(
+                      enable: true,
+                      canShowMarker: false,
+                    ),
+                  ),
+                  onChartTouchInteractionDown: (_) => _beginChartInteraction(),
+                  onChartTouchInteractionMove: (_) => _beginChartInteraction(),
+                  onChartTouchInteractionUp: (_) => _endChartInteraction(),
+                  onActualRangeChanged: _handleActualRangeChanged,
+                  onTrackballPositionChanging: _handleTrackballPositionChanging,
+                  primaryXAxis: DateTimeAxis(
+                    title: const AxisTitle(text: 'Local time'),
+                    dateFormat: _showSecondsOnXAxis
+                        ? _localTimeSecondsFormat
+                        : _localTimeMinutesFormat,
+                    edgeLabelPlacement: EdgeLabelPlacement.shift,
+                    labelIntersectAction: AxisLabelIntersectAction.rotate45,
+                    maximumLabels: 6,
+                  ),
+                  primaryYAxis: _buildYAxis(chart.yAxisConfig),
+                  series: chart.series,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -827,32 +858,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   }
 
   ChartAxis _buildYAxis(_YAxisConfig config) {
-    final trimmedTitle = config.title.trim();
     if (_logScale) {
-      if (trimmedTitle.isEmpty) {
-        return LogarithmicAxis(
-          logBase: 10,
-          minimum: config.minimum,
-          maximum: config.maximum,
-          numberFormat: _scientificNumberFormat,
-        );
-      }
       return LogarithmicAxis(
         logBase: 10,
         minimum: config.minimum,
         maximum: config.maximum,
         numberFormat: _scientificNumberFormat,
-        title: AxisTitle(text: trimmedTitle),
-      );
-    }
-    if (trimmedTitle.isEmpty) {
-      return NumericAxis(
-        minimum: config.minimum,
-        maximum: config.maximum,
-        interval: config.interval,
-        decimalPlaces: config.decimalPlaces,
-        numberFormat: _scientificNumberFormat,
-        rangePadding: ChartRangePadding.none,
+        labelStyle: const TextStyle(fontSize: 10),
       );
     }
     return NumericAxis(
@@ -862,7 +874,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       decimalPlaces: config.decimalPlaces,
       numberFormat: _scientificNumberFormat,
       rangePadding: ChartRangePadding.none,
-      title: AxisTitle(text: trimmedTitle),
+      labelStyle: const TextStyle(fontSize: 10),
     );
   }
 
@@ -1138,13 +1150,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
   int _decimalPlacesForInterval(double interval) {
     if (!interval.isFinite || interval <= 0) {
-      return 3;
+      return 2;
     }
     if (interval >= 1) {
       return 0;
     }
     final decimals = (-math.log(interval) / math.ln10).ceil();
-    return math.max(0, math.min(12, decimals));
+    return math.max(0, math.min(2, decimals));
   }
 
   double _niceStep(double value) {
@@ -1197,6 +1209,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         '${local.day.toString().padLeft(2, '0')} '
         '${local.hour.toString().padLeft(2, '0')}:'
         '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  static String _historyFromLabel(PlotViewRequest request) {
+    if (request.sourceLabel == 'Custom') {
+      return 'History from ${_formatDateTime(request.startLocal)}';
+    }
+    return 'History from ${request.sourceLabel}';
   }
 }
 
