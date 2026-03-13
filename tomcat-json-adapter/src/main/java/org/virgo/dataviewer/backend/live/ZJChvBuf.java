@@ -252,8 +252,16 @@ public final class ZJChvBuf implements AutoCloseable {
             base = base.substring(colon + 1);
         }
         String[] tokens = base.split("[-_]");
-        if (tokens.length >= 2 && !tokens[1].trim().isEmpty()) {
-            return tokens[1].trim().toUpperCase(Locale.US);
+        if (tokens.length >= 2) {
+            String first = tokens[0].trim();
+            String second = tokens[1].trim();
+            if (!first.isEmpty() && !second.isEmpty()) {
+                String firstUpper = first.toUpperCase(Locale.US);
+                if ("INF".equals(firstUpper) || "VAC".equals(firstUpper) || "HVAC".equals(firstUpper)) {
+                    return firstUpper + "_" + second.toUpperCase(Locale.US);
+                }
+                return second.toUpperCase(Locale.US);
+            }
         }
         if (tokens.length >= 1 && !tokens[0].trim().isEmpty()) {
             return tokens[0].trim().toUpperCase(Locale.US);
