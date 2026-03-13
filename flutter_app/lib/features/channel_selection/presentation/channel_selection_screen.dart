@@ -268,6 +268,43 @@ class _ChannelSelectionScreenState
     context.push('/plots', extra: request);
   }
 
+  Future<void> _resetPlots() async {
+    if (_selectedChannels.isEmpty) {
+      return;
+    }
+
+    final shouldReset = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Reset plots?'),
+          content: Text(
+            'Clear the current ${_selectedChannels.length}-channel selection?',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Reset'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || shouldReset != true) {
+      return;
+    }
+
+    setState(() {
+      _selectedChannels.clear();
+      _isSelectionHeaderCompact = false;
+    });
+    _showMessage('Plot selection cleared.');
+  }
+
   void _openFiltersPanel() {
     if (_categories.isEmpty && !_isLoadingCategories) {
       unawaited(_loadCategories());
@@ -563,22 +600,17 @@ class _ChannelSelectionScreenState
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   if (isCompact)
-                    Row(
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: <Widget>[
-                        Expanded(
-                          child: Text(
-                            'Selected channels',
-                            style: theme.textTheme.titleLarge,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
+                        Text(
+                          'Selected channels',
+                          style: theme.textTheme.titleLarge,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        const SizedBox(width: 12),
-                        FilledButton.tonal(
-                          onPressed:
-                              _selectedChannels.isEmpty ? null : _openPlots,
-                          child: const Text('Open plots'),
-                        ),
+                        const SizedBox(height: 8),
+                        _buildSelectionActions(),
                       ],
                     )
                   else ...<Widget>[
@@ -594,10 +626,7 @@ class _ChannelSelectionScreenState
                       style: theme.textTheme.bodyMedium,
                     ),
                     const SizedBox(height: 12),
-                    FilledButton.tonal(
-                      onPressed: _selectedChannels.isEmpty ? null : _openPlots,
-                      child: const Text('Open plots'),
-                    ),
+                    _buildSelectionActions(),
                   ],
                   SizedBox(height: isCompact ? 8 : 12),
                   Wrap(
@@ -685,6 +714,24 @@ class _ChannelSelectionScreenState
                     },
                   ),
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSelectionActions() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: <Widget>[
+        FilledButton.tonal(
+          onPressed: _selectedChannels.isEmpty ? null : _openPlots,
+          child: const Text('Open plots'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _selectedChannels.isEmpty ? null : _resetPlots,
+          icon: const Icon(Icons.restart_alt),
+          label: const Text('Reset plots'),
         ),
       ],
     );

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
 
+import 'package:dataviewer/features/plot_view/presentation/plot_axis_value_formatter.dart';
 import 'package:dataviewer/features/plot_view/presentation/plot_view_providers.dart';
 import 'package:dataviewer/shared/models/plot_models.dart';
 import 'package:dataviewer/shared/models/plot_view_request.dart';
@@ -29,7 +30,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     Color(0xFFC97A40),
     Color(0xFF0081A7),
   ];
-  static final NumberFormat _scientificNumberFormat = NumberFormat('0.00E0');
   static final NumberFormat _trackballNumberFormat = NumberFormat('0.00E0');
 
   final Map<String, SplayTreeMap<int, double?>> _liveValuesByChannel =
@@ -863,7 +863,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         logBase: 10,
         minimum: config.minimum,
         maximum: config.maximum,
-        numberFormat: _scientificNumberFormat,
+        axisLabelFormatter: (AxisLabelRenderDetails details) =>
+            _formatYAxisLabel(config, details),
         labelStyle: const TextStyle(fontSize: 10),
       );
     }
@@ -871,10 +872,20 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       minimum: config.minimum,
       maximum: config.maximum,
       interval: config.interval,
-      decimalPlaces: config.decimalPlaces,
-      numberFormat: _scientificNumberFormat,
+      axisLabelFormatter: (AxisLabelRenderDetails details) =>
+          _formatYAxisLabel(config, details),
       rangePadding: ChartRangePadding.none,
       labelStyle: const TextStyle(fontSize: 10),
+    );
+  }
+
+  ChartAxisLabel _formatYAxisLabel(
+    _YAxisConfig config,
+    AxisLabelRenderDetails details,
+  ) {
+    return ChartAxisLabel(
+      config.labelFormatter.format(details.value),
+      details.textStyle,
     );
   }
 
@@ -1094,7 +1105,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }
 
     if (!range.hasValues) {
-      return _YAxisConfig(title: title, decimalPlaces: 3);
+      return _YAxisConfig(
+        title: title,
+        labelFormatter: PlotAxisValueFormatter.forAxis(),
+      );
     }
 
     if (_logScale) {
@@ -1105,7 +1119,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
           title: title,
           minimum: minValue / 1.2,
           maximum: maxValue * 1.2,
-          decimalPlaces: 3,
+          labelFormatter: PlotAxisValueFormatter.forAxis(
+            minimum: minValue / 1.2,
+            maximum: maxValue * 1.2,
+          ),
         );
       }
       final paddingFactor = 0.04;
@@ -1113,7 +1130,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         title: title,
         minimum: math.max(minValue * (1 - paddingFactor), double.minPositive),
         maximum: maxValue * (1 + paddingFactor),
-        decimalPlaces: 3,
+        labelFormatter: PlotAxisValueFormatter.forAxis(
+          minimum: math.max(minValue * (1 - paddingFactor), double.minPositive),
+          maximum: maxValue * (1 + paddingFactor),
+        ),
       );
     }
 
@@ -1144,19 +1164,12 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       minimum: axisMinimum,
       maximum: axisMaximum,
       interval: interval,
-      decimalPlaces: _decimalPlacesForInterval(interval),
+      labelFormatter: PlotAxisValueFormatter.forAxis(
+        minimum: axisMinimum,
+        maximum: axisMaximum,
+        interval: interval,
+      ),
     );
-  }
-
-  int _decimalPlacesForInterval(double interval) {
-    if (!interval.isFinite || interval <= 0) {
-      return 2;
-    }
-    if (interval >= 1) {
-      return 0;
-    }
-    final decimals = (-math.log(interval) / math.ln10).ceil();
-    return math.max(0, math.min(2, decimals));
   }
 
   double _niceStep(double value) {
@@ -1239,14 +1252,14 @@ class _YAxisConfig {
     this.minimum,
     this.maximum,
     this.interval,
-    required this.decimalPlaces,
+    required this.labelFormatter,
   });
 
   final String title;
   final double? minimum;
   final double? maximum;
   final double? interval;
-  final int decimalPlaces;
+  final PlotAxisValueFormatter labelFormatter;
 }
 
 class _DataRange {
