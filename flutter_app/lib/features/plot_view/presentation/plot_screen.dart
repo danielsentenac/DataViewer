@@ -669,13 +669,17 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         final bucketPoints =
             _sanitizeBucketPoints(historySeries.expandBuckets());
         chartSeries.add(
-          LineSeries<_LinePoint, DateTime>(
-            dataSource: _bucketMidpoints(bucketPoints),
-            xValueMapper: (_LinePoint point, _) => point.time,
-            yValueMapper: (_LinePoint point, _) => point.value,
+          HiloSeries<BucketPoint, DateTime>(
+            dataSource: bucketPoints,
+            xValueMapper: (BucketPoint point, _) =>
+                DateTime.fromMillisecondsSinceEpoch(point.utcMs, isUtc: true)
+                    .toLocal(),
+            lowValueMapper: (BucketPoint point, _) => point.minValue,
+            highValueMapper: (BucketPoint point, _) => point.maxValue,
             name: displayName,
             color: color,
-            width: splitMode ? 1.4 : 1.6,
+            borderWidth: splitMode ? 1.2 : 1.4,
+            showIndicationForSameValues: true,
           ),
         );
       }
@@ -758,19 +762,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         utcMs: point.utcMs,
         minValue: minValue,
         maxValue: maxValue,
-      );
-    }).toList(growable: false);
-  }
-
-  List<_LinePoint> _bucketMidpoints(List<BucketPoint> points) {
-    return points.map((BucketPoint point) {
-      final value = point.minValue == null || point.maxValue == null
-          ? null
-          : (point.minValue! + point.maxValue!) / 2;
-      return _LinePoint(
-        time: DateTime.fromMillisecondsSinceEpoch(point.utcMs, isUtc: true)
-            .toLocal(),
-        value: value,
       );
     }).toList(growable: false);
   }
@@ -894,7 +885,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     final point = pointInfo.chartPoint;
     pointInfo.header = '';
     pointInfo.label =
-        '${_formatTrackballTime(point?.x)}\n${_formatTrackballValue(point?.y)}';
+        '${_formatTrackballTime(point?.x)}\n${_formatTrackballPoint(point)}';
   }
 
   String _formatTrackballTime(dynamic value) {
@@ -909,6 +900,25 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return _trackballNumberFormat.format(value.toDouble());
     }
     return '--';
+  }
+
+  String _formatTrackballPoint(CartesianChartPoint<dynamic>? point) {
+    final high = point?.high;
+    final low = point?.low;
+    if (high is num && high.isFinite && low is num && low.isFinite) {
+      final lowValue = low.toDouble();
+      final highValue = high.toDouble();
+      final scale = math.max(
+        math.max(lowValue.abs(), highValue.abs()),
+        1.0,
+      );
+      if ((highValue - lowValue).abs() <= scale * 1e-9) {
+        return _formatTrackballValue(highValue);
+      }
+      return '${_formatTrackballValue(lowValue)} to '
+          '${_formatTrackballValue(highValue)}';
+    }
+    return _formatTrackballValue(point?.y);
   }
 
   double _chartHeightFor(int chartCount) {
@@ -1282,13 +1292,6 @@ class _DataRange {
     minimum = math.min(minimum!, value);
     maximum = math.max(maximum!, value);
   }
-}
-
-class _LinePoint {
-  const _LinePoint({required this.time, required this.value});
-
-  final DateTime time;
-  final double? value;
 }
 
 class _InfoChip extends StatelessWidget {
