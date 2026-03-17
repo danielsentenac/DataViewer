@@ -2,9 +2,12 @@ package org.virgo.dataviewer.backend.live;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import org.virgo.dataviewer.backend.time.GpsTimeConverter;
 
@@ -25,18 +28,20 @@ public final class ZfdPayloadDecoder {
 
     private final String gpsChannel;
     private final GpsTimeConverter gpsTimeConverter;
+    private final ConcurrentMap<String, String> identifierPool = new ConcurrentHashMap<String, String>();
 
     public ZfdPayloadDecoder(String gpsChannel, GpsTimeConverter gpsTimeConverter) {
         this.gpsChannel = gpsChannel;
         this.gpsTimeConverter = gpsTimeConverter;
     }
 
-    public LiveSnapshot decode(byte[] payload) {
+    public LiveSnapshot decode(byte[] payload, Map<String, String> catalogUnitsOut) {
         Map<String, String> values = new LinkedHashMap<String, String>();
-        Map<String, LiveCatalogChannel> catalogChannels = new LinkedHashMap<String, LiveCatalogChannel>();
+        Map<String, String> catalogUnits = catalogUnitsOut == null ? new LinkedHashMap<String, String>() : catalogUnitsOut;
+        List<String> catalogChannelNames = new ArrayList<String>();
         long gpsSeconds;
         long utcMs;
-        if (!parseZfdBinaryPayload(payload, values, catalogChannels)) {
+        if (!parseZfdBinaryPayload(payload, values, catalogUnits, catalogChannelNames)) {
             return null;
         }
         try {
@@ -45,10 +50,14 @@ public final class ZfdPayloadDecoder {
             return null;
         }
         utcMs = gpsTimeConverter.gpsSecondsToUtcMs(gpsSeconds);
-        return new LiveSnapshot(gpsSeconds, utcMs, values, new ArrayList<LiveCatalogChannel>(catalogChannels.values()));
+        return new LiveSnapshot(gpsSeconds, utcMs, values, catalogChannelNames);
     }
 
-    private boolean parseZfdBinaryPayload(byte[] payload, Map<String, String> values, Map<String, LiveCatalogChannel> catalogChannels) {
+    private boolean parseZfdBinaryPayload(
+            byte[] payload,
+            Map<String, String> values,
+            Map<String, String> catalogUnits,
+            List<String> catalogChannelNames) {
         int version;
         int flags;
         long gpsS;
@@ -80,7 +89,7 @@ public final class ZfdPayloadDecoder {
         values.put("GPS_S", gpsCompat);
         values.put("GPS_NS", Long.toString(gpsNs));
         values.put("PAYLOAD_FORMAT", "ZFD1");
-        return parseZfdBinaryPayloadEntries(payload, count, hasUnits, values, catalogChannels);
+        return parseZfdBinaryPayloadEntries(payload, count, hasUnits, values, catalogUnits, catalogChannelNames);
     }
 
     private boolean parseZfdBinaryPayloadEntries(
@@ -88,7 +97,8 @@ public final class ZfdPayloadDecoder {
             long serCount,
             boolean hasUnits,
             Map<String, String> values,
-            Map<String, LiveCatalogChannel> catalogChannels) {
+            Map<String, String> catalogUnits,
+            List<String> catalogChannelNames) {
         int off = 20;
         for (long serIndex = 0; serIndex < serCount; serIndex++) {
             int serLen;
@@ -105,7 +115,7 @@ public final class ZfdPayloadDecoder {
                 return false;
             }
             if (serLen > 0) {
-                ser = new String(payload, off, serLen, StandardCharsets.UTF_8).trim();
+                ser = canonicalizeIdentifier(new String(payload, off, serLen, StandardCharsets.UTF_8).trim());
                 off += serLen;
             }
 
@@ -125,7 +135,7 @@ public final class ZfdPayloadDecoder {
                 if (nameLen < 0 || off + nameLen > payload.length) {
                     return false;
                 }
-                channelName = new String(payload, off, nameLen, StandardCharsets.UTF_8).trim();
+                channelName = canonicalizeIdentifier(new String(payload, off, nameLen, StandardCharsets.UTF_8).trim());
                 off += nameLen;
                 if (channelName.isEmpty()) {
                     continue;
@@ -149,7 +159,7 @@ public final class ZfdPayloadDecoder {
                     return false;
                 }
                 off = offRef[0];
-                registerCatalogChannel(catalogChannels, ser, channelName, unit);
+                registerCatalogChannel(catalogUnits, catalogChannelNames, ser, channelName, unit);
             }
         }
         return true;
@@ -159,42 +169,41 @@ public final class ZfdPayloadDecoder {
         if (values == null || channelName == null) {
             return;
         }
-        String channel = channelName.trim();
-        if (channel.isEmpty()) {
+        String canonical = canonicalChannelName(serName, channelName);
+        if (canonical.isEmpty()) {
             return;
         }
-        values.put(channel, value);
-
-        String ser = serName == null ? "" : serName.trim();
-        if (!ser.isEmpty()) {
-            String joined = ser + "_" + channel;
-            values.put(joined, value);
-            if (!ser.startsWith("V1:")) {
-                values.put("V1:" + joined, value);
-            }
-        }
+        values.put(canonical, value);
     }
 
-    private void registerCatalogChannel(Map<String, LiveCatalogChannel> catalogChannels, String serName, String channelName, String unit) {
+    private void registerCatalogChannel(
+            Map<String, String> catalogUnits,
+            List<String> catalogChannelNames,
+            String serName,
+            String channelName,
+            String unit) {
         String canonicalName = canonicalChannelName(serName, channelName);
-        if (canonicalName.isEmpty() || catalogChannels.containsKey(canonicalName)) {
+        if (canonicalName.isEmpty() || catalogUnits.containsKey(canonicalName)) {
             return;
         }
-        catalogChannels.put(canonicalName, new LiveCatalogChannel(canonicalName, emptyToNull(unit)));
+        catalogUnits.put(canonicalName, emptyToNull(canonicalizeIdentifier(unit)));
+        catalogChannelNames.add(canonicalName);
     }
 
-    private static String canonicalChannelName(String serName, String channelName) {
+    private String canonicalChannelName(String serName, String channelName) {
         String channel = channelName == null ? "" : channelName.trim();
         String ser = serName == null ? "" : serName.trim();
         if (channel.isEmpty()) {
             return "";
         }
+        channel = canonicalizeIdentifier(channel);
         if (!ser.isEmpty()) {
-            String joined = ser + "_" + channel;
+            ser = canonicalizeIdentifier(ser);
+            String joined = canonicalizeIdentifier(ser + "_" + channel);
             if (ser.indexOf(':') > 0) {
                 return joined;
             }
-            return "V1:" + joined;
+            return canonicalizeIdentifier("V1:" + joined);
         }
         return channel;
     }
@@ -218,6 +227,18 @@ public final class ZfdPayloadDecoder {
         String unit = unitLen == 0 ? null : new String(payload, off, unitLen, StandardCharsets.UTF_8).trim();
         offRef[0] = off + unitLen;
         return unit;
+    }
+
+    private String canonicalizeIdentifier(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+        String existing = identifierPool.putIfAbsent(trimmed, trimmed);
+        return existing == null ? trimmed : existing;
     }
 
     private String decodeTypedValueToString(byte[] payload, int[] offRef, int valueKind) {

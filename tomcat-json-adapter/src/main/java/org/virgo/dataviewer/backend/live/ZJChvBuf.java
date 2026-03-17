@@ -26,6 +26,9 @@ public final class ZJChvBuf implements AutoCloseable {
     private final ZfdPayloadDecoder decoder;
     private final Object bufferLock = new Object();
     private final Deque<LiveSnapshot> snapshots = new ArrayDeque<LiveSnapshot>();
+    private final Map<String, String> catalogUnitsByName = new LinkedHashMap<String, String>();
+    private final Map<String, Integer> catalogReferenceCounts = new HashMap<String, Integer>();
+    private final Map<String, String> normalizedCatalogNames = new HashMap<String, String>();
     private volatile boolean running;
     private volatile Thread subscriberThread;
 
@@ -69,37 +72,36 @@ public final class ZJChvBuf implements AutoCloseable {
 
     public List<ChannelSummaryDto> snapshotCatalog() {
         synchronized (bufferLock) {
-            Map<String, ChannelSummaryDto> entries = new LinkedHashMap<String, ChannelSummaryDto>();
-            for (LiveSnapshot snapshot : snapshots) {
-                for (LiveCatalogChannel channel : snapshot.getCatalogChannels()) {
-                    if (channel == null || channel.getName() == null) {
-                        continue;
-                    }
-                    String name = channel.getName().trim();
-                    if (name.isEmpty()) {
-                        continue;
-                    }
-                    entries.put(name, new ChannelSummaryDto(
-                            name,
-                            deriveDisplayName(name),
-                            channel.getUnit(),
-                            deriveCategory(name),
-                            1));
+            List<ChannelSummaryDto> entries = new ArrayList<ChannelSummaryDto>(catalogUnitsByName.size());
+            for (Map.Entry<String, String> entry : catalogUnitsByName.entrySet()) {
+                String name = entry.getKey();
+                if (name == null || name.trim().isEmpty()) {
+                    continue;
                 }
+                entries.add(new ChannelSummaryDto(
+                        name,
+                        deriveDisplayName(name),
+                        entry.getValue(),
+                        deriveCategory(name),
+                        1));
             }
-            return new ArrayList<ChannelSummaryDto>(entries.values());
+            return entries;
         }
     }
 
     public List<LivePlotSeriesDto> collectSeries(List<String> channels, long afterUtcMs) {
         List<LiveSnapshot> buffered;
         List<String> requestedChannels = channels == null ? Collections.<String>emptyList() : channels;
+        List<String> resolvedChannels = new ArrayList<String>(requestedChannels.size());
         synchronized (bufferLock) {
             buffered = new ArrayList<LiveSnapshot>(snapshots.size());
             for (LiveSnapshot snapshot : snapshots) {
                 if (snapshot.getUtcMs() > afterUtcMs) {
                     buffered.add(snapshot);
                 }
+            }
+            for (String channel : requestedChannels) {
+                resolvedChannels.add(resolveStoredChannelName(channel));
             }
         }
         if (buffered.isEmpty() || requestedChannels.isEmpty()) {
@@ -115,14 +117,16 @@ public final class ZJChvBuf implements AutoCloseable {
         }
 
         List<LivePlotSeriesDto> result = new ArrayList<LivePlotSeriesDto>(requestedChannels.size());
-        for (String channel : requestedChannels) {
+        for (int channelIndex = 0; channelIndex < requestedChannels.size(); channelIndex++) {
+            String channel = requestedChannels.get(channelIndex);
+            String resolvedChannel = resolvedChannels.get(channelIndex);
             List<Double> values = new ArrayList<Double>(Collections.nCopies(span, (Double) null));
             for (long gps = startGps; gps <= endGps; gps++) {
                 LiveSnapshot snapshot = byGps.get(Long.valueOf(gps));
                 if (snapshot == null) {
                     continue;
                 }
-                values.set((int) (gps - startGps), parseNumeric(snapshot.findValue(channel)));
+                values.set((int) (gps - startGps), parseNumeric(snapshot.findValue(resolvedChannel)));
             }
             result.add(new LivePlotSeriesDto(channel, gpsTimeConverter.gpsSecondsToUtcMs(startGps), 1000, values));
         }
@@ -186,7 +190,8 @@ public final class ZJChvBuf implements AutoCloseable {
     }
 
     private void acceptPayload(byte[] payload) {
-        LiveSnapshot snapshot = decoder.decode(payload);
+        Map<String, String> catalogUnits = new LinkedHashMap<String, String>();
+        LiveSnapshot snapshot = decoder.decode(payload, catalogUnits);
         LiveSnapshot last;
         if (snapshot == null) {
             return;
@@ -198,12 +203,75 @@ public final class ZJChvBuf implements AutoCloseable {
             }
             if (last != null && snapshot.getGpsSeconds() == last.getGpsSeconds()) {
                 snapshots.removeLast();
+                releaseCatalogEntries(last);
             }
             snapshots.addLast(snapshot);
+            retainCatalogEntries(snapshot, catalogUnits);
             while (snapshots.size() > maxSnapshots) {
-                snapshots.removeFirst();
+                releaseCatalogEntries(snapshots.removeFirst());
             }
         }
+    }
+
+    private void retainCatalogEntries(LiveSnapshot snapshot, Map<String, String> catalogUnits) {
+        for (String name : snapshot.getCatalogChannelNames()) {
+            if (name == null || name.isEmpty()) {
+                continue;
+            }
+            Integer count = catalogReferenceCounts.get(name);
+            catalogReferenceCounts.put(name, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
+            if (count == null) {
+                catalogUnitsByName.put(name, catalogUnits.get(name));
+                normalizedCatalogNames.put(normalizeChannelKey(name), name);
+            } else if (catalogUnitsByName.get(name) == null && catalogUnits.get(name) != null) {
+                catalogUnitsByName.put(name, catalogUnits.get(name));
+            }
+        }
+    }
+
+    private void releaseCatalogEntries(LiveSnapshot snapshot) {
+        for (String name : snapshot.getCatalogChannelNames()) {
+            Integer count = catalogReferenceCounts.get(name);
+            if (count == null) {
+                continue;
+            }
+            if (count.intValue() <= 1) {
+                catalogReferenceCounts.remove(name);
+                catalogUnitsByName.remove(name);
+                dropNormalizedCatalogName(name);
+                continue;
+            }
+            catalogReferenceCounts.put(name, Integer.valueOf(count.intValue() - 1));
+        }
+    }
+
+    private void dropNormalizedCatalogName(String channelName) {
+        String normalized = normalizeChannelKey(channelName);
+        if (!channelName.equals(normalizedCatalogNames.get(normalized))) {
+            return;
+        }
+        normalizedCatalogNames.remove(normalized);
+        for (String candidate : catalogUnitsByName.keySet()) {
+            if (!channelName.equals(candidate) && normalized.equals(normalizeChannelKey(candidate))) {
+                normalizedCatalogNames.put(normalized, candidate);
+                break;
+            }
+        }
+    }
+
+    private String resolveStoredChannelName(String requestedChannel) {
+        if (requestedChannel == null) {
+            return null;
+        }
+        String trimmed = requestedChannel.trim();
+        if (trimmed.isEmpty()) {
+            return trimmed;
+        }
+        if (catalogUnitsByName.containsKey(trimmed)) {
+            return trimmed;
+        }
+        String resolved = normalizedCatalogNames.get(normalizeChannelKey(trimmed));
+        return resolved == null ? trimmed : resolved;
     }
 
     private static Double parseNumeric(String value) {
@@ -290,6 +358,10 @@ public final class ZJChvBuf implements AutoCloseable {
             }
         }
         return trimmed;
+    }
+
+    private static String normalizeChannelKey(String key) {
+        return stripVersionPrefix(key).toUpperCase(Locale.US);
     }
 
     @Override
