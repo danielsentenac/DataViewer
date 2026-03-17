@@ -41,8 +41,5 @@ The backend URL is supplied at build/run time with
 
 ## Important integration rule
 
-The existing `VACUUM_SUPERVISOR` client talks to `jchv` using Java object serialization. The new Flutter app should not depend on that transport directly. A thin JSON adapter on the Tomcat side should expose mobile-friendly endpoints and call the legacy servlets internally when needed.
+A thin JSON adapter on the Tomcat side exposes mobile-friendly endpoints and call the legacy servlets internally when needed.
 
-## Next step
-
-Use the architecture and contracts in `docs/` to scaffold the Flutter app and the matching Tomcat JSON endpoints.
