@@ -31,10 +31,10 @@ If the Android SDK is not installed yet, install the command-line tools and then
 Then build:
 
 ```bash
-cd flutter_app
-../scripts/flutterw pub get
-../scripts/flutterw build apk --release \
-  --dart-define=DATAVIEWER_BASE_URL=http://your-tomcat-host:8081/dataviewer
+cp scripts/dataviewer.local.env.example scripts/dataviewer.local.env
+$EDITOR scripts/dataviewer.local.env
+./scripts/flutter_local.sh pub get
+./scripts/flutter_local.sh build apk --release
 ```
 
 Expected output:
@@ -42,11 +42,19 @@ Expected output:
 - `flutter_app/build/app/outputs/flutter-apk/app-release.apk`
 
 The backend URL is intentionally not hardcoded in the repository.
-`DATAVIEWER_BASE_URL` must be provided at build time, and can also be passed
-for local runs:
+For repeat local builds, keep it in the ignored `scripts/dataviewer.local.env`
+file used by `./scripts/flutter_local.sh`.
+
+Direct `flutterw` commands still work if you want to pass the endpoint inline:
 
 ```bash
 cd flutter_app
 ../scripts/flutterw run \
   --dart-define=DATAVIEWER_BASE_URL=http://your-tomcat-host:8081/dataviewer
+```
+
+If you sanitize the repo before publishing, restore your private values with:
+
+```bash
+./scripts/sanitize_public_repo.sh --restore
 ```

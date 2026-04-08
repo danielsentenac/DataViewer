@@ -1,6 +1,14 @@
 .tooling/
 .home/
 .pub-cache/
+.claude/
+.DS_Store
+*.log
+*.orig
+*.swp
+.idea/
+.vscode/
+*.iml
 
 flutter_app/.dart_tool/
 flutter_app/.flutter-plugins
@@ -10,3 +18,4 @@ flutter_app/build/
 tomcat-json-adapter/build/
 .gradle/
 .codex
+scripts/dataviewer.local.env

@@ -48,7 +48,7 @@ These `ServletContext` init params are recognized by the backend:
 - `virgo.frame.jni.path`
   Optional absolute path to the JNI shared library. If set, it overrides `virgo.frame.jni.library`.
 - `zcmsubendpoint`
-  Default: `tcp://olserver38.virgo.infn.it:3333`
+  Default: `tcp://your-zcm-host:3333`
 - `zcmgpschannel`
   Default: `GPS`
 - `virgo.live.buffer.minutes`
@@ -134,7 +134,7 @@ Exact Tomcat deployment steps:
 6. Edit `$CATALINA_BASE/conf/Catalina/localhost/dataviewer.xml` and set at least:
    - `virgo.frame.jni.path=/opt/dataviewer/lib/libvirgo_frame_jni.so`
    - `virgo.trend.ffl=/virgoData/ffl/trend.ffl`
-   - `zcmsubendpoint=tcp://olserver38.virgo.infn.it:3333`
+   - `zcmsubendpoint=tcp://your-zcm-host:3333`
    - `virgo.live.buffer.minutes=5`
 7. Restart Tomcat:
    ```bash
@@ -166,7 +166,7 @@ For the 5-minute live buffer used in production, a practical starting point is:
 - `-Xms512m`
 - `-Xmx3072m`
 
-The previous `ParallelGC` launcher on `olserver134` used `-Xss2048k -Xms2048m -Xmx4096m`.
+The previous `ParallelGC` launcher in production used `-Xss2048k -Xms2048m -Xmx4096m`.
 That left Tomcat with about 4 GiB of heap committed even when the adapter's live set had dropped well below 1 GiB after GC.
 
 The Gradle module now applies the `war` plugin, so Tomcat packaging includes `WEB-INF/web.xml`.

@@ -38,8 +38,12 @@ The app stays intentionally simple:
 See [docs/build_android_apk.md](docs/build_android_apk.md).
 The backend URL is supplied at build/run time with
 `--dart-define=DATAVIEWER_BASE_URL=...`.
+For local/private work, copy
+[`scripts/dataviewer.local.env.example`](scripts/dataviewer.local.env.example)
+to `scripts/dataviewer.local.env` and use `./scripts/flutter_local.sh`.
+To switch sanitized placeholders back to your private values, run
+`./scripts/sanitize_public_repo.sh --restore`.
 
 ## Important integration rule
 
 A thin JSON adapter on the Tomcat side exposes mobile-friendly endpoints and call the legacy servlets internally when needed.
-

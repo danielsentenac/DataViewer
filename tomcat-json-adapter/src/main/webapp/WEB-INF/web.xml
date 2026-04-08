@@ -31,7 +31,7 @@
     </context-param>
     <context-param>
         <param-name>zcmsubendpoint</param-name>
-        <param-value>tcp://olserver38.virgo.infn.it:3333</param-value>
+        <param-value>tcp://your-zcm-host:3333</param-value>
     </context-param>
     <context-param>
         <param-name>zcmgpschannel</param-name>
