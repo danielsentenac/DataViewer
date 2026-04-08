@@ -2,7 +2,7 @@ class AppConfig {
   const AppConfig({
     required this.baseUrl,
     this.connectTimeout = const Duration(seconds: 5),
-    this.receiveTimeout = const Duration(seconds: 10),
+    this.receiveTimeout = const Duration(seconds: 120),
     this.configurationError,
   });
 

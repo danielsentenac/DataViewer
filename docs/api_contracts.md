@@ -109,9 +109,19 @@ Request:
   "sampling": {
     "targetBuckets": 720,
     "preserveExtrema": true
-  }
+  },
+  "historyChunkSeconds": 21600,
+  "historyCursorUtcMs": 1773297000000,
+  "historyTargetEndUtcMs": 1773300600000
 }
 ```
+
+Paging fields are optional:
+
+- omit them for the legacy one-shot history response
+- set `historyChunkSeconds` to let the server return only the next history slice
+- echo `historyCursorUtcMs` from the previous response `query.nextChunkStartUtcMs`
+- echo `historyTargetEndUtcMs` from the previous response `query.endUtcMs` so the history end stays stable while paging
 
 Response:
 
@@ -121,7 +131,10 @@ Response:
     "channelCount": 2,
     "resolvedStartUtcMs": 1773297000000,
     "resolvedStartGps": 1457032218,
-    "endUtcMs": 1773300600000
+    "endUtcMs": 1773300600000,
+    "loadedEndUtcMs": 1773298800000,
+    "nextChunkStartUtcMs": 1773298800000,
+    "historyComplete": false
   },
   "series": [
     {
@@ -135,7 +148,7 @@ Response:
     }
   ],
   "live": {
-    "mode": "poll",
+    "mode": "deferred",
     "recommendedPollMs": 1000,
     "resumeAfterUtcMs": 1773300600000
   }
@@ -147,6 +160,10 @@ Client reconstruction rule:
 - timestamp of `values[i]` is `startUtcMs + i * stepMs`
 - `null` means that sample is missing or unavailable
 - the client should not invent interpolated values unless explicitly asked by the user
+- `query.endUtcMs` is the fixed history target end for the whole load
+- `query.loadedEndUtcMs` is the history already present in this response
+- while `query.historyComplete` is `false`, keep paging with `query.nextChunkStartUtcMs`
+- only start live polling when `live.mode` changes to `poll`
 
 ## 4. Bucketed historical response
 

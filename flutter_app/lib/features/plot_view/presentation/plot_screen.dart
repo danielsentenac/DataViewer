@@ -40,15 +40,20 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final DateFormat _localTimeMinutesFormat = DateFormat('HH:mm');
   final DateFormat _localTimeSecondsFormat = DateFormat('HH:mm:ss');
+  final DateFormat _localTimeDateFormat = DateFormat('d MMM HH:mm');
+  final DateFormat _localTimeDayFormat = DateFormat('d MMM');
   final DateFormat _trackballTimeFormat = DateFormat('HH:mm:ss');
 
   PlotQueryResponse? _response;
   Timer? _liveTimer;
   bool _isLoading = false;
+  bool _isHistoryLoading = false;
   bool _isPollingLive = false;
   bool _isChartInteractionActive = false;
   bool _isWorkspaceHeaderCompact = false;
   bool _showSecondsOnXAxis = false;
+  bool _showDateOnXAxis = false;
+  bool _showDayOnlyOnXAxis = false;
   bool _overlayCharts = false;
   bool _logScale = false;
   String? _error;
@@ -56,8 +61,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   String? _deferredLiveError;
   int? _deferredServerNowUtcMs;
   int? _deferredLastLiveAfterUtcMs;
+  bool? _pendingShowSecondsOnXAxis;
+  bool? _pendingShowDateOnXAxis;
+  bool? _pendingShowDayOnlyOnXAxis;
   int _lastLiveAfterUtcMs = 0;
   int _lastServerNowUtcMs = 0;
+  int _loadGeneration = 0;
+  bool _isAxisLabelUpdateScheduled = false;
 
   @override
   void initState() {
@@ -95,10 +105,12 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     if (request == null) {
       return;
     }
+    final loadGeneration = ++_loadGeneration;
 
     _liveTimer?.cancel();
     setState(() {
       _isLoading = true;
+      _isHistoryLoading = false;
       _error = null;
       _liveError = null;
       _isWorkspaceHeaderCompact = false;
@@ -110,44 +122,70 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _deferredLiveError = null;
       _isChartInteractionActive = false;
       _showSecondsOnXAxis = false;
+      _showDateOnXAxis = false;
+      _showDayOnlyOnXAxis = false;
+      _pendingShowSecondsOnXAxis = null;
+      _pendingShowDateOnXAxis = null;
+      _pendingShowDayOnlyOnXAxis = null;
       _liveValuesByChannel.clear();
       _deferredLiveValuesByChannel.clear();
     });
 
     try {
       final repository = ref.read(plotRepositoryProvider);
-      final response = await repository.queryPlot(
-        PlotQueryRequest(
-          channels: request.channels,
-          timeRange: TimeRangeRequest(
-            startLocalIso: request.startLocalIso,
-            timeZone: request.timeZoneOffsetLabel,
-          ),
-          sampling: SamplingRequest(
-            targetBuckets: _targetBucketsFor(request),
-            preserveExtrema: true,
-          ),
-        ),
-      );
-      if (!mounted) {
+      final baseRequest = _buildInitialPlotQueryRequest(request);
+      PlotQueryRequest currentRequest = baseRequest;
+      PlotQueryResponse? accumulatedResponse;
+
+      while (true) {
+        final chunkResponse = await repository.queryPlot(currentRequest);
+        if (!_isActiveLoad(loadGeneration)) {
+          return;
+        }
+        accumulatedResponse = accumulatedResponse == null
+            ? chunkResponse
+            : _mergeHistoryResponses(accumulatedResponse, chunkResponse);
+        setState(() {
+          _response = accumulatedResponse;
+          _isLoading = false;
+          _isHistoryLoading = !accumulatedResponse!.query.historyComplete;
+          _error = null;
+        });
+        if (chunkResponse.query.historyComplete) {
+          break;
+        }
+        currentRequest = _buildNextPlotQueryRequest(
+          request,
+          currentRequest,
+          chunkResponse,
+        );
+      }
+
+      if (!_isActiveLoad(loadGeneration)) {
         return;
       }
+      final completedResponse = accumulatedResponse;
       setState(() {
-        _response = response;
-        _lastLiveAfterUtcMs = response.live.resumeAfterUtcMs;
-        _lastServerNowUtcMs = response.query.endUtcMs;
+        _response = completedResponse;
+        _lastLiveAfterUtcMs = completedResponse.live.resumeAfterUtcMs;
+        _lastServerNowUtcMs = completedResponse.query.endUtcMs;
+        _isHistoryLoading = false;
       });
       await _pollLive();
+      if (!_isActiveLoad(loadGeneration)) {
+        return;
+      }
       _startLivePolling();
     } catch (error) {
-      if (!mounted) {
+      if (!_isActiveLoad(loadGeneration)) {
         return;
       }
       setState(() {
         _error = error.toString();
+        _isHistoryLoading = false;
       });
     } finally {
-      if (mounted) {
+      if (_isActiveLoad(loadGeneration)) {
         setState(() {
           _isLoading = false;
         });
@@ -237,14 +275,58 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return;
     }
 
-    final shouldShowSeconds =
-        visibleMax.difference(visibleMin).abs() <= const Duration(minutes: 10);
-    if (shouldShowSeconds == _showSecondsOnXAxis || !mounted) {
+    final range = visibleMax.difference(visibleMin).abs();
+    final shouldShowSeconds = range <= const Duration(minutes: 10);
+    final shouldShowDayOnly = range > const Duration(days: 3);
+    final shouldShowDate =
+        !shouldShowDayOnly && range > const Duration(hours: 20);
+    if (!mounted) {
       return;
     }
 
-    setState(() {
-      _showSecondsOnXAxis = shouldShowSeconds;
+    final pendingShowSeconds =
+        _pendingShowSecondsOnXAxis ?? _showSecondsOnXAxis;
+    final pendingShowDate = _pendingShowDateOnXAxis ?? _showDateOnXAxis;
+    final pendingShowDayOnly =
+        _pendingShowDayOnlyOnXAxis ?? _showDayOnlyOnXAxis;
+    if (shouldShowSeconds == pendingShowSeconds &&
+        shouldShowDate == pendingShowDate &&
+        shouldShowDayOnly == pendingShowDayOnly) {
+      return;
+    }
+
+    _pendingShowSecondsOnXAxis = shouldShowSeconds;
+    _pendingShowDateOnXAxis = shouldShowDate;
+    _pendingShowDayOnlyOnXAxis = shouldShowDayOnly;
+    if (_isAxisLabelUpdateScheduled) {
+      return;
+    }
+
+    _isAxisLabelUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _isAxisLabelUpdateScheduled = false;
+      if (!mounted ||
+          _pendingShowSecondsOnXAxis == null ||
+          _pendingShowDateOnXAxis == null ||
+          _pendingShowDayOnlyOnXAxis == null) {
+        return;
+      }
+      final nextShowSeconds = _pendingShowSecondsOnXAxis!;
+      final nextShowDate = _pendingShowDateOnXAxis!;
+      final nextShowDayOnly = _pendingShowDayOnlyOnXAxis!;
+      _pendingShowSecondsOnXAxis = null;
+      _pendingShowDateOnXAxis = null;
+      _pendingShowDayOnlyOnXAxis = null;
+      if (nextShowSeconds == _showSecondsOnXAxis &&
+          nextShowDate == _showDateOnXAxis &&
+          nextShowDayOnly == _showDayOnlyOnXAxis) {
+        return;
+      }
+      setState(() {
+        _showSecondsOnXAxis = nextShowSeconds;
+        _showDateOnXAxis = nextShowDate;
+        _showDayOnlyOnXAxis = nextShowDayOnly;
+      });
     });
   }
 
@@ -361,7 +443,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     List<_ChartBundle> charts,
   ) {
     final response = _response;
-    final historyEnd = response == null
+    final historyLoadedEnd = response == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(
+            response.query.loadedEndUtcMs,
+            isUtc: true,
+          ).toLocal();
+    final historyTargetEnd = response == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(
             response.query.endUtcMs,
@@ -373,6 +461,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             _lastServerNowUtcMs,
             isUtc: true,
           ).toLocal();
+    final historyProgress =
+        response == null ? null : _historyProgress(response.query);
     final mixedUnits =
         _overlayCharts && _unitsForChannels(request.channels).length > 1;
     final isCompact = _isWorkspaceHeaderCompact && charts.isNotEmpty;
@@ -422,9 +512,28 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                       if (!isCompact)
                         _InfoChip(
                           icon: Icons.history,
-                          label: historyEnd == null
+                          label: historyLoadedEnd == null
                               ? 'History pending'
-                              : 'History to ${_formatDateTime(historyEnd)}',
+                              : _isHistoryLoading
+                                  ? 'History ${(historyProgress! * 100).round()}%'
+                                  : 'History to ${_formatDateTime(historyLoadedEnd)}',
+                          compact: true,
+                        ),
+                      if (!isCompact &&
+                          _isHistoryLoading &&
+                          historyLoadedEnd != null)
+                        _InfoChip(
+                          icon: Icons.hourglass_top,
+                          label:
+                              'Loaded to ${_formatDateTime(historyLoadedEnd)}',
+                          compact: true,
+                        ),
+                      if (!isCompact &&
+                          _isHistoryLoading &&
+                          historyTargetEnd != null)
+                        _InfoChip(
+                          icon: Icons.flag,
+                          label: 'Target ${_formatDateTime(historyTargetEnd)}',
                           compact: true,
                         ),
                       if (!isCompact)
@@ -468,9 +577,24 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
               ),
             ),
           ),
+        if (_isHistoryLoading && response != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(0, 0, 0, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  'Loading history ${(historyProgress! * 100).round()}%',
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: 6),
+                LinearProgressIndicator(value: historyProgress),
+              ],
+            ),
+          ),
         const SizedBox(height: 12),
         Expanded(
-          child: _isLoading
+          child: _isLoading && charts.isEmpty
               ? const Center(child: CircularProgressIndicator())
               : charts.isEmpty
                   ? Center(
@@ -655,6 +779,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         chartSeries.add(
           LineSeries<RawPoint, DateTime>(
             dataSource: points,
+            animationDuration: 0,
             xValueMapper: (RawPoint point, _) => point.localTimestamp,
             yValueMapper: (RawPoint point, _) => point.value,
             name: displayName,
@@ -671,6 +796,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         chartSeries.add(
           HiloSeries<BucketPoint, DateTime>(
             dataSource: bucketPoints,
+            animationDuration: 0,
             xValueMapper: (BucketPoint point, _) =>
                 DateTime.fromMillisecondsSinceEpoch(point.utcMs, isUtc: true)
                     .toLocal(),
@@ -688,6 +814,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         chartSeries.add(
           LineSeries<RawPoint, DateTime>(
             dataSource: liveSeries,
+            animationDuration: 0,
             xValueMapper: (RawPoint point, _) => point.localTimestamp,
             yValueMapper: (RawPoint point, _) => point.value,
             name: splitMode ? 'Live' : '$displayName live',
@@ -832,7 +959,11 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                     title: const AxisTitle(text: 'Local time'),
                     dateFormat: _showSecondsOnXAxis
                         ? _localTimeSecondsFormat
-                        : _localTimeMinutesFormat,
+                        : _showDayOnlyOnXAxis
+                            ? _localTimeDayFormat
+                            : _showDateOnXAxis
+                                ? _localTimeDateFormat
+                                : _localTimeMinutesFormat,
                     edgeLabelPlacement: EdgeLabelPlacement.shift,
                     labelIntersectAction: AxisLabelIntersectAction.rotate45,
                     maximumLabels: 6,
@@ -1044,6 +1175,174 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }
   }
 
+  bool _isActiveLoad(int loadGeneration) {
+    return mounted && loadGeneration == _loadGeneration;
+  }
+
+  PlotQueryRequest _buildInitialPlotQueryRequest(PlotViewRequest request) {
+    return PlotQueryRequest(
+      channels: request.channels,
+      timeRange: TimeRangeRequest(
+        startLocalIso: request.startLocalIso,
+        timeZone: request.timeZoneOffsetLabel,
+      ),
+      sampling: SamplingRequest(
+        targetBuckets: _targetBucketsFor(request),
+        preserveExtrema: true,
+      ),
+      historyChunkSeconds: _initialHistoryChunkSecondsFor(request),
+    );
+  }
+
+  PlotQueryRequest _buildNextPlotQueryRequest(
+    PlotViewRequest request,
+    PlotQueryRequest previousRequest,
+    PlotQueryResponse chunkResponse,
+  ) {
+    return PlotQueryRequest(
+      channels: previousRequest.channels,
+      timeRange: previousRequest.timeRange,
+      sampling: previousRequest.sampling,
+      historyChunkSeconds: _nextHistoryChunkSecondsFor(
+        request,
+        previousRequest.historyChunkSeconds,
+      ),
+      historyCursorUtcMs: chunkResponse.query.nextChunkStartUtcMs,
+      historyTargetEndUtcMs: chunkResponse.query.endUtcMs,
+    );
+  }
+
+  PlotQueryResponse _mergeHistoryResponses(
+    PlotQueryResponse accumulated,
+    PlotQueryResponse incoming,
+  ) {
+    return PlotQueryResponse(
+      query: incoming.query,
+      series: _mergePlotSeries(accumulated.series, incoming.series),
+      live: incoming.live,
+    );
+  }
+
+  List<PlotSeries> _mergePlotSeries(
+    List<PlotSeries> accumulated,
+    List<PlotSeries> incoming,
+  ) {
+    final mergedByChannel = <String, PlotSeries>{
+      for (final PlotSeries series in accumulated) series.channel: series,
+    };
+    final order = <String>[
+      for (final PlotSeries series in accumulated) series.channel,
+    ];
+
+    for (final PlotSeries incomingSeries in incoming) {
+      final existingSeries = mergedByChannel[incomingSeries.channel];
+      if (existingSeries == null) {
+        mergedByChannel[incomingSeries.channel] = incomingSeries;
+        order.add(incomingSeries.channel);
+        continue;
+      }
+      if (existingSeries is RawPlotSeries && incomingSeries is RawPlotSeries) {
+        mergedByChannel[incomingSeries.channel] =
+            _mergeRawHistorySeries(existingSeries, incomingSeries);
+        continue;
+      }
+      if (existingSeries is BucketedPlotSeries &&
+          incomingSeries is BucketedPlotSeries) {
+        mergedByChannel[incomingSeries.channel] =
+            _mergeBucketedHistorySeries(existingSeries, incomingSeries);
+        continue;
+      }
+      mergedByChannel[incomingSeries.channel] = incomingSeries;
+    }
+
+    return order
+        .map((String channel) => mergedByChannel[channel]!)
+        .toList(growable: false);
+  }
+
+  RawPlotSeries _mergeRawHistorySeries(
+    RawPlotSeries accumulated,
+    RawPlotSeries incoming,
+  ) {
+    if (accumulated.stepMs != incoming.stepMs) {
+      return incoming;
+    }
+    final valuesByUtcMs = SplayTreeMap<int, double?>();
+    for (final RawPoint point in accumulated.expandSamples()) {
+      valuesByUtcMs[point.utcMs] = point.value;
+    }
+    for (final RawPoint point in incoming.expandSamples()) {
+      valuesByUtcMs[point.utcMs] = point.value;
+    }
+    if (valuesByUtcMs.isEmpty) {
+      return incoming;
+    }
+    final startUtcMs = valuesByUtcMs.keys.first;
+    final endUtcMsExclusive = valuesByUtcMs.keys.last + accumulated.stepMs;
+    final values = <double?>[];
+    for (int utcMs = startUtcMs;
+        utcMs < endUtcMsExclusive;
+        utcMs += accumulated.stepMs) {
+      values.add(valuesByUtcMs[utcMs]);
+    }
+    return RawPlotSeries(
+      channel: incoming.channel,
+      displayName: incoming.displayName,
+      unit: incoming.unit,
+      startUtcMs: startUtcMs,
+      stepMs: incoming.stepMs,
+      values: values,
+    );
+  }
+
+  BucketedPlotSeries _mergeBucketedHistorySeries(
+    BucketedPlotSeries accumulated,
+    BucketedPlotSeries incoming,
+  ) {
+    if (accumulated.bucketSeconds != incoming.bucketSeconds) {
+      return incoming;
+    }
+    final bucketMs = accumulated.bucketSeconds * 1000;
+    final bucketsByUtcMs = SplayTreeMap<int, BucketPoint>();
+    for (final BucketPoint point in accumulated.expandBuckets()) {
+      bucketsByUtcMs[point.utcMs] = point;
+    }
+    for (final BucketPoint point in incoming.expandBuckets()) {
+      bucketsByUtcMs[point.utcMs] = point;
+    }
+    if (bucketsByUtcMs.isEmpty) {
+      return incoming;
+    }
+    final startUtcMs = bucketsByUtcMs.keys.first;
+    final endUtcMsExclusive = bucketsByUtcMs.keys.last + bucketMs;
+    final minValues = <double?>[];
+    final maxValues = <double?>[];
+    for (int utcMs = startUtcMs; utcMs < endUtcMsExclusive; utcMs += bucketMs) {
+      final point = bucketsByUtcMs[utcMs];
+      minValues.add(point?.minValue);
+      maxValues.add(point?.maxValue);
+    }
+    return BucketedPlotSeries(
+      channel: incoming.channel,
+      displayName: incoming.displayName,
+      unit: incoming.unit,
+      startUtcMs: startUtcMs,
+      bucketSeconds: incoming.bucketSeconds,
+      minValues: minValues,
+      maxValues: maxValues,
+    );
+  }
+
+  double? _historyProgress(PlotQueryMeta meta) {
+    final totalDurationMs = meta.endUtcMs - meta.resolvedStartUtcMs;
+    if (totalDurationMs <= 0) {
+      return null;
+    }
+    final loadedDurationMs = (meta.loadedEndUtcMs - meta.resolvedStartUtcMs)
+        .clamp(0, totalDurationMs);
+    return loadedDurationMs / totalDurationMs;
+  }
+
   String _displayNameForChannel(String channel, PlotSeries? series) {
     final displayName = series?.displayName.trim() ?? '';
     return displayName.isEmpty ? channel : displayName;
@@ -1223,6 +1522,41 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return 3000;
     }
     return 720;
+  }
+
+  int? _initialHistoryChunkSecondsFor(PlotViewRequest request) {
+    final estimatedSpan = DateTime.now().difference(request.startLocal).abs();
+    if (estimatedSpan <= const Duration(hours: 6)) {
+      return null;
+    }
+    if (estimatedSpan <= const Duration(days: 1)) {
+      return 15 * 60;
+    }
+    if (estimatedSpan <= const Duration(days: 7)) {
+      return 30 * 60;
+    }
+    if (estimatedSpan <= const Duration(days: 30)) {
+      return 60 * 60;
+    }
+    return 2 * 60 * 60;
+  }
+
+  int? _nextHistoryChunkSecondsFor(
+    PlotViewRequest request,
+    int? previousChunkSeconds,
+  ) {
+    if (previousChunkSeconds == null) {
+      return null;
+    }
+    final estimatedSpan = DateTime.now().difference(request.startLocal).abs();
+    final maximumChunkSeconds = estimatedSpan <= const Duration(days: 1)
+        ? 2 * 60 * 60
+        : estimatedSpan <= const Duration(days: 7)
+            ? 6 * 60 * 60
+            : estimatedSpan <= const Duration(days: 30)
+                ? 12 * 60 * 60
+                : 24 * 60 * 60;
+    return math.min(previousChunkSeconds * 2, maximumChunkSeconds);
   }
 
   static String _formatDateTime(DateTime value) {

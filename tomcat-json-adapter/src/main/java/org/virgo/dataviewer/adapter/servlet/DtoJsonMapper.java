@@ -54,7 +54,10 @@ public final class DtoJsonMapper {
                         requiredString(timeRange.get("timeZone"), "timeRange.timeZone")),
                 new SamplingRequestDto(
                         integer(sampling.get("targetBuckets"), "sampling.targetBuckets"),
-                        booleanValue(sampling.get("preserveExtrema"), "sampling.preserveExtrema", true)));
+                        booleanValue(sampling.get("preserveExtrema"), "sampling.preserveExtrema", true)),
+                integer(root.get("historyChunkSeconds"), "historyChunkSeconds"),
+                longValue(root.get("historyCursorUtcMs"), "historyCursorUtcMs"),
+                longValue(root.get("historyTargetEndUtcMs"), "historyTargetEndUtcMs"));
     }
 
     public static LivePlotRequestDto livePlotRequest(Map<String, Object> root) throws AdapterException {
@@ -147,6 +150,9 @@ public final class DtoJsonMapper {
         query.put("resolvedStartUtcMs", dto.getResolvedStartUtcMs());
         query.put("resolvedStartGps", dto.getResolvedStartGps());
         query.put("endUtcMs", dto.getEndUtcMs());
+        query.put("loadedEndUtcMs", dto.getLoadedEndUtcMs());
+        query.put("nextChunkStartUtcMs", dto.getNextChunkStartUtcMs());
+        query.put("historyComplete", Boolean.valueOf(dto.isHistoryComplete()));
         return query;
     }
 
@@ -232,6 +238,16 @@ public final class DtoJsonMapper {
         }
         if (value instanceof Number) {
             return Integer.valueOf(((Number) value).intValue());
+        }
+        throw AdapterException.badRequest("INVALID_PAYLOAD", "Expected integer at `" + field + "`.");
+    }
+
+    private static Long longValue(Object value, String field) throws AdapterException {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number) {
+            return Long.valueOf(((Number) value).longValue());
         }
         throw AdapterException.badRequest("INVALID_PAYLOAD", "Expected integer at `" + field + "`.");
     }

@@ -9,3 +9,4 @@ flutter_app/.packages
 flutter_app/build/
 tomcat-json-adapter/build/
 .gradle/
+.codex

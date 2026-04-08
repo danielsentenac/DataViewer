@@ -2,6 +2,7 @@ package org.virgo.dataviewer.backend.live;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
@@ -27,7 +28,7 @@ public final class ZJChvBuf implements AutoCloseable {
     private final Object bufferLock = new Object();
     private final Deque<LiveSnapshot> snapshots = new ArrayDeque<LiveSnapshot>();
     private final Map<String, String> catalogUnitsByName = new LinkedHashMap<String, String>();
-    private final Map<String, Integer> catalogReferenceCounts = new HashMap<String, Integer>();
+    private final Map<String, Integer> channelIndexesByName = new HashMap<String, Integer>();
     private final Map<String, String> normalizedCatalogNames = new HashMap<String, String>();
     private volatile boolean running;
     private volatile Thread subscriberThread;
@@ -92,7 +93,7 @@ public final class ZJChvBuf implements AutoCloseable {
     public List<LivePlotSeriesDto> collectSeries(List<String> channels, long afterUtcMs) {
         List<LiveSnapshot> buffered;
         List<String> requestedChannels = channels == null ? Collections.<String>emptyList() : channels;
-        List<String> resolvedChannels = new ArrayList<String>(requestedChannels.size());
+        List<Integer> resolvedChannelIndexes = new ArrayList<Integer>(requestedChannels.size());
         synchronized (bufferLock) {
             buffered = new ArrayList<LiveSnapshot>(snapshots.size());
             for (LiveSnapshot snapshot : snapshots) {
@@ -101,7 +102,7 @@ public final class ZJChvBuf implements AutoCloseable {
                 }
             }
             for (String channel : requestedChannels) {
-                resolvedChannels.add(resolveStoredChannelName(channel));
+                resolvedChannelIndexes.add(resolveStoredChannelIndex(channel));
             }
         }
         if (buffered.isEmpty() || requestedChannels.isEmpty()) {
@@ -119,14 +120,14 @@ public final class ZJChvBuf implements AutoCloseable {
         List<LivePlotSeriesDto> result = new ArrayList<LivePlotSeriesDto>(requestedChannels.size());
         for (int channelIndex = 0; channelIndex < requestedChannels.size(); channelIndex++) {
             String channel = requestedChannels.get(channelIndex);
-            String resolvedChannel = resolvedChannels.get(channelIndex);
+            Integer resolvedChannelIndex = resolvedChannelIndexes.get(channelIndex);
             List<Double> values = new ArrayList<Double>(Collections.nCopies(span, (Double) null));
             for (long gps = startGps; gps <= endGps; gps++) {
                 LiveSnapshot snapshot = byGps.get(Long.valueOf(gps));
-                if (snapshot == null) {
+                if (snapshot == null || resolvedChannelIndex == null) {
                     continue;
                 }
-                values.set((int) (gps - startGps), parseNumeric(snapshot.findValue(resolvedChannel)));
+                values.set((int) (gps - startGps), snapshot.findNumericValue(resolvedChannelIndex.intValue()));
             }
             result.add(new LivePlotSeriesDto(channel, gpsTimeConverter.gpsSecondsToUtcMs(startGps), 1000, values));
         }
@@ -190,104 +191,87 @@ public final class ZJChvBuf implements AutoCloseable {
     }
 
     private void acceptPayload(byte[] payload) {
-        Map<String, String> catalogUnits = new LinkedHashMap<String, String>();
-        LiveSnapshot snapshot = decoder.decode(payload, catalogUnits);
+        DecodedSnapshot decoded = decoder.decode(payload);
         LiveSnapshot last;
-        if (snapshot == null) {
+        if (decoded == null) {
             return;
         }
         synchronized (bufferLock) {
             last = snapshots.peekLast();
-            if (last != null && snapshot.getGpsSeconds() < last.getGpsSeconds()) {
+            if (last != null && decoded.getGpsSeconds() < last.getGpsSeconds()) {
                 return;
             }
-            if (last != null && snapshot.getGpsSeconds() == last.getGpsSeconds()) {
+            if (last != null && decoded.getGpsSeconds() == last.getGpsSeconds()) {
                 snapshots.removeLast();
-                releaseCatalogEntries(last);
             }
-            snapshots.addLast(snapshot);
-            retainCatalogEntries(snapshot, catalogUnits);
+            retainCatalogEntries(decoded.getCatalogUnits());
+            ensureValueChannels(decoded.getNumericValues());
+            snapshots.addLast(toLiveSnapshot(decoded));
             while (snapshots.size() > maxSnapshots) {
-                releaseCatalogEntries(snapshots.removeFirst());
+                snapshots.removeFirst();
             }
         }
     }
 
-    private void retainCatalogEntries(LiveSnapshot snapshot, Map<String, String> catalogUnits) {
-        for (String name : snapshot.getCatalogChannelNames()) {
+    private void retainCatalogEntries(Map<String, String> catalogUnits) {
+        for (Map.Entry<String, String> entry : catalogUnits.entrySet()) {
+            String name = entry.getKey();
             if (name == null || name.isEmpty()) {
                 continue;
             }
-            Integer count = catalogReferenceCounts.get(name);
-            catalogReferenceCounts.put(name, Integer.valueOf(count == null ? 1 : count.intValue() + 1));
-            if (count == null) {
-                catalogUnitsByName.put(name, catalogUnits.get(name));
-                normalizedCatalogNames.put(normalizeChannelKey(name), name);
-            } else if (catalogUnitsByName.get(name) == null && catalogUnits.get(name) != null) {
-                catalogUnitsByName.put(name, catalogUnits.get(name));
+            ensureChannelIndex(name);
+            if (!catalogUnitsByName.containsKey(name)) {
+                catalogUnitsByName.put(name, entry.getValue());
+                String normalized = normalizeChannelKey(name);
+                if (!normalizedCatalogNames.containsKey(normalized)) {
+                    normalizedCatalogNames.put(normalized, name);
+                }
+            } else if (catalogUnitsByName.get(name) == null && entry.getValue() != null) {
+                catalogUnitsByName.put(name, entry.getValue());
             }
         }
     }
 
-    private void releaseCatalogEntries(LiveSnapshot snapshot) {
-        for (String name : snapshot.getCatalogChannelNames()) {
-            Integer count = catalogReferenceCounts.get(name);
-            if (count == null) {
+    private void ensureValueChannels(Map<String, Double> numericValues) {
+        for (String name : numericValues.keySet()) {
+            ensureChannelIndex(name);
+        }
+    }
+
+    private LiveSnapshot toLiveSnapshot(DecodedSnapshot decoded) {
+        double[] valuesByChannelIndex = new double[channelIndexesByName.size()];
+        Arrays.fill(valuesByChannelIndex, Double.NaN);
+        for (Map.Entry<String, Double> entry : decoded.getNumericValues().entrySet()) {
+            Integer channelIndex = channelIndexesByName.get(entry.getKey());
+            if (channelIndex == null || entry.getValue() == null) {
                 continue;
             }
-            if (count.intValue() <= 1) {
-                catalogReferenceCounts.remove(name);
-                catalogUnitsByName.remove(name);
-                dropNormalizedCatalogName(name);
-                continue;
-            }
-            catalogReferenceCounts.put(name, Integer.valueOf(count.intValue() - 1));
+            valuesByChannelIndex[channelIndex.intValue()] = entry.getValue().doubleValue();
         }
+        return new LiveSnapshot(decoded.getGpsSeconds(), decoded.getUtcMs(), valuesByChannelIndex);
     }
 
-    private void dropNormalizedCatalogName(String channelName) {
-        String normalized = normalizeChannelKey(channelName);
-        if (!channelName.equals(normalizedCatalogNames.get(normalized))) {
-            return;
-        }
-        normalizedCatalogNames.remove(normalized);
-        for (String candidate : catalogUnitsByName.keySet()) {
-            if (!channelName.equals(candidate) && normalized.equals(normalizeChannelKey(candidate))) {
-                normalizedCatalogNames.put(normalized, candidate);
-                break;
-            }
-        }
-    }
-
-    private String resolveStoredChannelName(String requestedChannel) {
+    private Integer resolveStoredChannelIndex(String requestedChannel) {
         if (requestedChannel == null) {
             return null;
         }
         String trimmed = requestedChannel.trim();
         if (trimmed.isEmpty()) {
-            return trimmed;
+            return null;
         }
-        if (catalogUnitsByName.containsKey(trimmed)) {
-            return trimmed;
+        Integer direct = channelIndexesByName.get(trimmed);
+        if (direct != null) {
+            return direct;
         }
         String resolved = normalizedCatalogNames.get(normalizeChannelKey(trimmed));
-        return resolved == null ? trimmed : resolved;
+        return resolved == null ? null : channelIndexesByName.get(resolved);
     }
 
-    private static Double parseNumeric(String value) {
-        if (value == null) {
-            return null;
+    private void ensureChannelIndex(String channelName) {
+        if (channelName == null || channelName.isEmpty() || channelIndexesByName.containsKey(channelName)) {
+            return;
         }
-        String trimmed = value.trim();
-        if (trimmed.isEmpty() || "NOTEXIST".equalsIgnoreCase(trimmed) || "---".equals(trimmed)) {
-            return null;
-        }
-        try {
-            double parsed = Double.parseDouble(trimmed);
-            return Double.isFinite(parsed) ? Double.valueOf(parsed) : null;
-        } catch (NumberFormatException exception) {
-            return null;
-        }
+        channelIndexesByName.put(channelName, Integer.valueOf(channelIndexesByName.size()));
     }
 
     private static void closeZmqObject(Object value) {
@@ -378,6 +362,9 @@ public final class ZJChvBuf implements AutoCloseable {
         }
         synchronized (bufferLock) {
             snapshots.clear();
+            catalogUnitsByName.clear();
+            channelIndexesByName.clear();
+            normalizedCatalogNames.clear();
         }
     }
 }

@@ -24,6 +24,8 @@ import org.virgo.dataviewer.backend.live.ZJChvBuf;
 import org.virgo.dataviewer.backend.time.GpsTimeConverter;
 
 public final class VirgoPlotService implements PlotService {
+    private static final int MIN_PROGRESSIVE_TARGET_BUCKETS = 120;
+
     private final TrendArchiveReader archiveReader;
     private final ZJChvBuf liveBuffer;
     private final GpsTimeConverter gpsTimeConverter;
@@ -61,24 +63,52 @@ public final class VirgoPlotService implements PlotService {
         if (handoffGps < effectiveStartGps) {
             handoffGps = effectiveStartGps;
         }
+        long resolvedStartUtcMs = gpsTimeConverter.gpsSecondsToUtcMs(effectiveStartGps);
+        long computedHistoryEndUtcMs = gpsTimeConverter.gpsSecondsToUtcMs(handoffGps);
+        long historyTargetEndUtcMs = resolveHistoryTargetEndUtcMs(
+                request.getHistoryTargetEndUtcMs(),
+                resolvedStartUtcMs,
+                computedHistoryEndUtcMs);
+        long cursorStartUtcMs = resolveCursorStartUtcMs(
+                request.getHistoryCursorUtcMs(),
+                resolvedStartUtcMs,
+                historyTargetEndUtcMs);
+        int historyChunkSeconds = resolveHistoryChunkSeconds(
+                request.getHistoryChunkSeconds(),
+                cursorStartUtcMs,
+                historyTargetEndUtcMs);
+        long cursorStartGps = gpsTimeConverter.utcMsToGpsSeconds(cursorStartUtcMs);
+        long chunkEndGps = Math.min(handoffGps, cursorStartGps + historyChunkSeconds);
+        long chunkLoadedEndUtcMs = gpsTimeConverter.gpsSecondsToUtcMs(chunkEndGps);
+        boolean historyComplete = chunkLoadedEndUtcMs >= historyTargetEndUtcMs;
+        Long nextChunkStartUtcMs = historyComplete ? null : Long.valueOf(chunkLoadedEndUtcMs);
+        long totalHistoryDurationSeconds = Math.max(0L, handoffGps - effectiveStartGps);
+        long chunkDurationSeconds = Math.max(0L, chunkEndGps - cursorStartGps);
 
         List<PlotSeriesDto> series = new ArrayList<PlotSeriesDto>();
-        if (handoffGps > effectiveStartGps) {
-            long durationSeconds = handoffGps - effectiveStartGps;
-            List<TrendRawSeries> rawSeries = archiveReader.readRawSeries(request.getChannels(), effectiveStartGps, durationSeconds);
+        if (chunkDurationSeconds > 0L) {
+            List<TrendRawSeries> rawSeries = archiveReader.readRawSeries(request.getChannels(), cursorStartGps, chunkDurationSeconds);
             for (TrendRawSeries rawSeriesEntry : rawSeries) {
-                series.add(toPlotSeries(rawSeriesEntry, request.getSampling()));
+                series.add(toPlotSeries(
+                        rawSeriesEntry,
+                        request.getSampling(),
+                        totalHistoryDurationSeconds,
+                        chunkDurationSeconds));
             }
         }
 
-        long resolvedStartUtcMs = gpsTimeConverter.gpsSecondsToUtcMs(effectiveStartGps);
-        long historyEndUtcMs = gpsTimeConverter.gpsSecondsToUtcMs(handoffGps);
         PlotQueryMetadataDto metadata = new PlotQueryMetadataDto(
                 request.getChannels().size(),
                 resolvedStartUtcMs,
                 effectiveStartGps,
-                historyEndUtcMs);
-        LiveDirectiveDto liveDirective = new LiveDirectiveDto("poll", livePollMs, historyEndUtcMs);
+                historyTargetEndUtcMs,
+                chunkLoadedEndUtcMs,
+                nextChunkStartUtcMs,
+                historyComplete);
+        LiveDirectiveDto liveDirective = new LiveDirectiveDto(
+                historyComplete ? "poll" : "deferred",
+                livePollMs,
+                historyTargetEndUtcMs);
         return new PlotQueryResponseDto(metadata, series, liveDirective);
     }
 
@@ -103,9 +133,16 @@ public final class VirgoPlotService implements PlotService {
         }
     }
 
-    private PlotSeriesDto toPlotSeries(TrendRawSeries rawSeries, SamplingRequestDto samplingRequest) {
-        if (samplingRequest == null || samplingRequest.getTargetBuckets() == null
-                || rawSeries.getValues().size() <= samplingRequest.getTargetBuckets().intValue()) {
+    private PlotSeriesDto toPlotSeries(
+            TrendRawSeries rawSeries,
+            SamplingRequestDto samplingRequest,
+            long totalHistoryDurationSeconds,
+            long chunkDurationSeconds) {
+        Integer effectiveTargetBuckets = resolveChunkTargetBuckets(
+                samplingRequest == null ? null : samplingRequest.getTargetBuckets(),
+                totalHistoryDurationSeconds,
+                chunkDurationSeconds);
+        if (effectiveTargetBuckets == null || rawSeries.getValues().size() <= effectiveTargetBuckets.intValue()) {
             return new RawPlotSeriesDto(
                     rawSeries.getChannel(),
                     rawSeries.getChannel(),
@@ -114,7 +151,7 @@ public final class VirgoPlotService implements PlotService {
                     rawSeries.getStepSeconds() * 1000,
                     rawSeries.getValues());
         }
-        return bucket(rawSeries, samplingRequest.getTargetBuckets().intValue());
+        return bucket(rawSeries, effectiveTargetBuckets.intValue());
     }
 
     private BucketedPlotSeriesDto bucket(TrendRawSeries rawSeries, int targetBuckets) {
@@ -148,5 +185,77 @@ public final class VirgoPlotService implements PlotService {
                 bucketSize * rawSeries.getStepSeconds(),
                 minValues,
                 maxValues);
+    }
+
+    private long resolveHistoryTargetEndUtcMs(
+            Long requestedTargetEndUtcMs,
+            long resolvedStartUtcMs,
+            long computedHistoryEndUtcMs) throws AdapterException {
+        long historyTargetEndUtcMs = requestedTargetEndUtcMs == null
+                ? computedHistoryEndUtcMs
+                : requestedTargetEndUtcMs.longValue();
+        if (historyTargetEndUtcMs < resolvedStartUtcMs) {
+            throw AdapterException.badRequest(
+                    "INVALID_TIME_RANGE",
+                    "historyTargetEndUtcMs must be >= the resolved start time.");
+        }
+        if (historyTargetEndUtcMs > computedHistoryEndUtcMs) {
+            return computedHistoryEndUtcMs;
+        }
+        return historyTargetEndUtcMs;
+    }
+
+    private long resolveCursorStartUtcMs(
+            Long requestedCursorStartUtcMs,
+            long resolvedStartUtcMs,
+            long historyTargetEndUtcMs) throws AdapterException {
+        long cursorStartUtcMs = requestedCursorStartUtcMs == null
+                ? resolvedStartUtcMs
+                : requestedCursorStartUtcMs.longValue();
+        if (cursorStartUtcMs < resolvedStartUtcMs) {
+            throw AdapterException.badRequest(
+                    "INVALID_TIME_RANGE",
+                    "historyCursorUtcMs must be >= the resolved start time.");
+        }
+        if (cursorStartUtcMs > historyTargetEndUtcMs) {
+            throw AdapterException.badRequest(
+                    "INVALID_TIME_RANGE",
+                    "historyCursorUtcMs must be <= historyTargetEndUtcMs.");
+        }
+        return cursorStartUtcMs;
+    }
+
+    private int resolveHistoryChunkSeconds(
+            Integer requestedChunkSeconds,
+            long cursorStartUtcMs,
+            long historyTargetEndUtcMs) throws AdapterException {
+        long remainingSeconds = Math.max(0L, gpsTimeConverter.utcMsToGpsSeconds(historyTargetEndUtcMs)
+                - gpsTimeConverter.utcMsToGpsSeconds(cursorStartUtcMs));
+        if (requestedChunkSeconds == null) {
+            if (remainingSeconds > Integer.MAX_VALUE) {
+                throw AdapterException.badRequest("INVALID_TIME_RANGE", "Requested archive span is too large.");
+            }
+            return (int) remainingSeconds;
+        }
+        if (requestedChunkSeconds.intValue() <= 0) {
+            throw AdapterException.badRequest(
+                    "INVALID_TIME_RANGE",
+                    "historyChunkSeconds must be > 0 when provided.");
+        }
+        return Math.min(requestedChunkSeconds.intValue(), (int) Math.min(Integer.MAX_VALUE, remainingSeconds));
+    }
+
+    private Integer resolveChunkTargetBuckets(
+            Integer requestedTargetBuckets,
+            long totalHistoryDurationSeconds,
+            long chunkDurationSeconds) {
+        if (requestedTargetBuckets == null || requestedTargetBuckets.intValue() <= 0 || totalHistoryDurationSeconds <= 0L
+                || chunkDurationSeconds <= 0L || chunkDurationSeconds >= totalHistoryDurationSeconds) {
+            return requestedTargetBuckets;
+        }
+        int scaledTarget = (int) Math.ceil(
+                requestedTargetBuckets.doubleValue() * chunkDurationSeconds / (double) totalHistoryDurationSeconds);
+        int minimumTarget = Math.min(requestedTargetBuckets.intValue(), MIN_PROGRESSIVE_TARGET_BUCKETS);
+        return Integer.valueOf(Math.max(minimumTarget, Math.min(requestedTargetBuckets.intValue(), scaledTarget)));
     }
 }

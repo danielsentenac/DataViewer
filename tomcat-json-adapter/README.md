@@ -25,6 +25,7 @@ This module contains the mobile-facing Tomcat adapter for `DataViewer`.
 - `ZJChvBuf` is the new live and intermediate layer.
   It subscribes to the ZCM `SUB` endpoint, decodes `ZFD1` payloads, and keeps an in-memory circular buffer for continuity across the archive/live handoff.
   The buffer window is configured in minutes through `virgo.live.buffer.minutes` and can be set to `5`, `7`, `8`, or any other positive value.
+  Internally the buffer stores one dense numeric frame per second and shares the channel catalog across snapshots, so it no longer retains a full `Map<String,String>` copy for every channel in every second.
   It also provides the default channel catalog used by `/api/v1/channels/search` and `/api/v1/channels/categories`.
 - `JniTrendArchiveReader` is the default stateless history layer.
   It opens `/virgoData/ffl/trend.ffl` per request, reads 1 Hz windows through `FrFileIGetVAdc(...)`, applies missing-sample markers, and closes the file immediately.
@@ -154,6 +155,19 @@ The live catalog diagnostic endpoint returns:
 - the current number of buffered snapshots
 - the number of distinct catalog channels currently seen from `zJChv`
 - oldest/latest buffered UTC sample times
+
+## JVM sizing
+
+If your Tomcat launcher hard-codes heap settings, keep the heap floor low enough that the JVM can stay near the real post-GC live set of the adapter.
+
+For the 5-minute live buffer used in production, a practical starting point is:
+
+- `-Xss1024k`
+- `-Xms512m`
+- `-Xmx3072m`
+
+The previous `ParallelGC` launcher on `olserver134` used `-Xss2048k -Xms2048m -Xmx4096m`.
+That left Tomcat with about 4 GiB of heap committed even when the adapter's live set had dropped well below 1 GiB after GC.
 
 The Gradle module now applies the `war` plugin, so Tomcat packaging includes `WEB-INF/web.xml`.
 

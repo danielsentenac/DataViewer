@@ -50,17 +50,28 @@ class PlotQueryRequest {
     required this.channels,
     required this.timeRange,
     this.sampling = const SamplingRequest(),
+    this.historyChunkSeconds,
+    this.historyCursorUtcMs,
+    this.historyTargetEndUtcMs,
   });
 
   final List<String> channels;
   final TimeRangeRequest timeRange;
   final SamplingRequest sampling;
+  final int? historyChunkSeconds;
+  final int? historyCursorUtcMs;
+  final int? historyTargetEndUtcMs;
 
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
       'channels': channels,
       'timeRange': timeRange.toJson(),
       'sampling': sampling.toJson(),
+      if (historyChunkSeconds != null)
+        'historyChunkSeconds': historyChunkSeconds,
+      if (historyCursorUtcMs != null) 'historyCursorUtcMs': historyCursorUtcMs,
+      if (historyTargetEndUtcMs != null)
+        'historyTargetEndUtcMs': historyTargetEndUtcMs,
     };
   }
 }
@@ -71,19 +82,31 @@ class PlotQueryMeta {
     required this.resolvedStartUtcMs,
     required this.resolvedStartGps,
     required this.endUtcMs,
+    required this.loadedEndUtcMs,
+    required this.historyComplete,
+    this.nextChunkStartUtcMs,
   });
 
   final int channelCount;
   final int resolvedStartUtcMs;
   final int resolvedStartGps;
   final int endUtcMs;
+  final int loadedEndUtcMs;
+  final bool historyComplete;
+  final int? nextChunkStartUtcMs;
 
   factory PlotQueryMeta.fromJson(Map<String, dynamic> json) {
+    final endUtcMs = (json['endUtcMs'] as num? ?? 0).toInt();
+    final nextChunkStartUtcMs = (json['nextChunkStartUtcMs'] as num?)?.toInt();
     return PlotQueryMeta(
       channelCount: (json['channelCount'] as num? ?? 0).toInt(),
       resolvedStartUtcMs: (json['resolvedStartUtcMs'] as num? ?? 0).toInt(),
       resolvedStartGps: (json['resolvedStartGps'] as num? ?? 0).toInt(),
-      endUtcMs: (json['endUtcMs'] as num? ?? 0).toInt(),
+      endUtcMs: endUtcMs,
+      loadedEndUtcMs: (json['loadedEndUtcMs'] as num? ?? endUtcMs).toInt(),
+      nextChunkStartUtcMs: nextChunkStartUtcMs,
+      historyComplete:
+          json['historyComplete'] as bool? ?? nextChunkStartUtcMs == null,
     );
   }
 }

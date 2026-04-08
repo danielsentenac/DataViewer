@@ -1,10 +1,7 @@
 package org.virgo.dataviewer.backend.live;
 
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -35,36 +32,33 @@ public final class ZfdPayloadDecoder {
         this.gpsTimeConverter = gpsTimeConverter;
     }
 
-    public LiveSnapshot decode(byte[] payload, Map<String, String> catalogUnitsOut) {
-        Map<String, String> values = new LinkedHashMap<String, String>();
-        Map<String, String> catalogUnits = catalogUnitsOut == null ? new LinkedHashMap<String, String>() : catalogUnitsOut;
-        List<String> catalogChannelNames = new ArrayList<String>();
+    public DecodedSnapshot decode(byte[] payload) {
+        Map<String, Double> values = new LinkedHashMap<String, Double>();
+        Map<String, String> catalogUnits = new LinkedHashMap<String, String>();
         long gpsSeconds;
         long utcMs;
-        if (!parseZfdBinaryPayload(payload, values, catalogUnits, catalogChannelNames)) {
+        if (!parseZfdBinaryPayload(payload, values, catalogUnits)) {
             return null;
         }
-        try {
-            gpsSeconds = Long.parseLong(values.get("GPS_S"));
-        } catch (Exception exception) {
+        Double gpsValue = values.get("GPS_S");
+        if (gpsValue == null || !Double.isFinite(gpsValue.doubleValue())) {
             return null;
         }
+        gpsSeconds = (long) gpsValue.doubleValue();
         utcMs = gpsTimeConverter.gpsSecondsToUtcMs(gpsSeconds);
-        return new LiveSnapshot(gpsSeconds, utcMs, values, catalogChannelNames);
+        return new DecodedSnapshot(gpsSeconds, utcMs, values, catalogUnits);
     }
 
     private boolean parseZfdBinaryPayload(
             byte[] payload,
-            Map<String, String> values,
-            Map<String, String> catalogUnits,
-            List<String> catalogChannelNames) {
+            Map<String, Double> values,
+            Map<String, String> catalogUnits) {
         int version;
         int flags;
         long gpsS;
         long gpsNs;
         long count;
         boolean hasUnits;
-        String gpsCompat;
 
         if (values == null || payload == null || payload.length < 20) {
             return false;
@@ -83,22 +77,19 @@ public final class ZfdPayloadDecoder {
         }
 
         hasUnits = (flags & ZFD_BIN_FLAG_HAS_UNITS) != 0;
-        gpsCompat = Long.toString(gpsS);
-        values.put(gpsChannel, gpsCompat);
-        values.put("GPS", gpsCompat);
-        values.put("GPS_S", gpsCompat);
-        values.put("GPS_NS", Long.toString(gpsNs));
-        values.put("PAYLOAD_FORMAT", "ZFD1");
-        return parseZfdBinaryPayloadEntries(payload, count, hasUnits, values, catalogUnits, catalogChannelNames);
+        putDirectChannelValue(values, gpsChannel, (double) gpsS);
+        putDirectChannelValue(values, "GPS", (double) gpsS);
+        putDirectChannelValue(values, "GPS_S", (double) gpsS);
+        putDirectChannelValue(values, "GPS_NS", (double) gpsNs);
+        return parseZfdBinaryPayloadEntries(payload, count, hasUnits, values, catalogUnits);
     }
 
     private boolean parseZfdBinaryPayloadEntries(
             byte[] payload,
             long serCount,
             boolean hasUnits,
-            Map<String, String> values,
-            Map<String, String> catalogUnits,
-            List<String> catalogChannelNames) {
+            Map<String, Double> values,
+            Map<String, String> catalogUnits) {
         int off = 20;
         for (long serIndex = 0; serIndex < serCount; serIndex++) {
             int serLen;
@@ -143,14 +134,14 @@ public final class ZfdPayloadDecoder {
 
                 if (status == ZFD_BIN_STATUS_OK) {
                     int[] offRef = new int[] { off };
-                    String value = decodeTypedValueToString(payload, offRef, valueKind);
+                    Double value = decodeTypedValueToDouble(payload, offRef, valueKind);
                     if (value == null) {
                         return false;
                     }
                     off = offRef[0];
-                    putDecodedChannelValue(values, ser, channelName, value);
-                } else {
-                    putDecodedChannelValue(values, ser, channelName, "NOTEXIST");
+                    if (Double.isFinite(value.doubleValue())) {
+                        putDecodedChannelValue(values, ser, channelName, value.doubleValue());
+                    }
                 }
 
                 int[] offRef = new int[] { off };
@@ -159,13 +150,24 @@ public final class ZfdPayloadDecoder {
                     return false;
                 }
                 off = offRef[0];
-                registerCatalogChannel(catalogUnits, catalogChannelNames, ser, channelName, unit);
+                registerCatalogChannel(catalogUnits, ser, channelName, unit);
             }
         }
         return true;
     }
 
-    private void putDecodedChannelValue(Map<String, String> values, String serName, String channelName, String value) {
+    private void putDirectChannelValue(Map<String, Double> values, String channelName, double value) {
+        if (values == null || channelName == null) {
+            return;
+        }
+        String canonical = canonicalizeIdentifier(channelName);
+        if (canonical == null || canonical.isEmpty()) {
+            return;
+        }
+        values.put(canonical, Double.valueOf(value));
+    }
+
+    private void putDecodedChannelValue(Map<String, Double> values, String serName, String channelName, double value) {
         if (values == null || channelName == null) {
             return;
         }
@@ -173,12 +175,11 @@ public final class ZfdPayloadDecoder {
         if (canonical.isEmpty()) {
             return;
         }
-        values.put(canonical, value);
+        values.put(canonical, Double.valueOf(value));
     }
 
     private void registerCatalogChannel(
             Map<String, String> catalogUnits,
-            List<String> catalogChannelNames,
             String serName,
             String channelName,
             String unit) {
@@ -187,7 +188,6 @@ public final class ZfdPayloadDecoder {
             return;
         }
         catalogUnits.put(canonicalName, emptyToNull(canonicalizeIdentifier(unit)));
-        catalogChannelNames.add(canonicalName);
     }
 
     private String canonicalChannelName(String serName, String channelName) {
@@ -241,7 +241,7 @@ public final class ZfdPayloadDecoder {
         return existing == null ? trimmed : existing;
     }
 
-    private String decodeTypedValueToString(byte[] payload, int[] offRef, int valueKind) {
+    private Double decodeTypedValueToDouble(byte[] payload, int[] offRef, int valueKind) {
         int off = offRef[0];
         long bits64;
         long u32;
@@ -253,71 +253,78 @@ public final class ZfdPayloadDecoder {
             }
             bits64 = readLeI64Bits(payload, off);
             offRef[0] = off + 8;
-            return Double.toString(Double.longBitsToDouble(bits64));
+            return Double.valueOf(Double.longBitsToDouble(bits64));
         case ZFD_BIN_VALUE_F32:
             if (off + 4 > payload.length) {
                 return null;
             }
             u32 = readLeU32(payload, off);
             offRef[0] = off + 4;
-            return Float.toString(Float.intBitsToFloat((int) (u32 & 0xFFFFFFFFL)));
+            return Double.valueOf(Float.intBitsToFloat((int) (u32 & 0xFFFFFFFFL)));
         case ZFD_BIN_VALUE_I64:
             if (off + 8 > payload.length) {
                 return null;
             }
             bits64 = readLeI64Bits(payload, off);
             offRef[0] = off + 8;
-            return Long.toString(bits64);
+            return Double.valueOf((double) bits64);
         case ZFD_BIN_VALUE_U64:
             if (off + 8 > payload.length) {
                 return null;
             }
             bits64 = readLeI64Bits(payload, off);
             offRef[0] = off + 8;
-            return Long.toUnsignedString(bits64);
+            return Double.valueOf(unsignedLongToDouble(bits64));
         case ZFD_BIN_VALUE_I32:
             if (off + 4 > payload.length) {
                 return null;
             }
             u32 = readLeU32(payload, off);
             offRef[0] = off + 4;
-            return Integer.toString((int) (u32 & 0xFFFFFFFFL));
+            return Double.valueOf((double) (int) (u32 & 0xFFFFFFFFL));
         case ZFD_BIN_VALUE_U32:
             if (off + 4 > payload.length) {
                 return null;
             }
             u32 = readLeU32(payload, off);
             offRef[0] = off + 4;
-            return Long.toString(u32 & 0xFFFFFFFFL);
+            return Double.valueOf((double) (u32 & 0xFFFFFFFFL));
         case ZFD_BIN_VALUE_I16:
             if (off + 2 > payload.length) {
                 return null;
             }
             u16 = readLeU16(payload, off);
             offRef[0] = off + 2;
-            return Short.toString((short) (u16 & 0xFFFF));
+            return Double.valueOf((double) (short) (u16 & 0xFFFF));
         case ZFD_BIN_VALUE_U16:
             if (off + 2 > payload.length) {
                 return null;
             }
             u16 = readLeU16(payload, off);
             offRef[0] = off + 2;
-            return Integer.toString(u16 & 0xFFFF);
+            return Double.valueOf((double) (u16 & 0xFFFF));
         case ZFD_BIN_VALUE_I8:
             if (off + 1 > payload.length) {
                 return null;
             }
             offRef[0] = off + 1;
-            return Byte.toString((byte) payload[off]);
+            return Double.valueOf((double) payload[off]);
         case ZFD_BIN_VALUE_U8:
             if (off + 1 > payload.length) {
                 return null;
             }
             offRef[0] = off + 1;
-            return Integer.toString(payload[off] & 0xFF);
+            return Double.valueOf((double) (payload[off] & 0xFF));
         default:
             return null;
         }
+    }
+
+    private static double unsignedLongToDouble(long value) {
+        if (value >= 0L) {
+            return (double) value;
+        }
+        return (double) (value & Long.MAX_VALUE) + 0x1.0p63;
     }
 
     private static int readLeU16(byte[] payload, int off) {
