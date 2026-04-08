@@ -6,6 +6,7 @@ import 'package:dataviewer/features/plot_view/presentation/plot_axis_value_forma
 import 'package:dataviewer/features/plot_view/presentation/plot_view_providers.dart';
 import 'package:dataviewer/shared/models/plot_models.dart';
 import 'package:dataviewer/shared/models/plot_view_request.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -22,6 +23,7 @@ class PlotScreen extends ConsumerStatefulWidget {
 
 class _PlotScreenState extends ConsumerState<PlotScreen> {
   static const double _workspaceCompressOffset = 24;
+  static const double _desktopZoomSelectionMinExtent = 12;
   static const List<Color> _palette = <Color>[
     Color(0xFF0B6E75),
     Color(0xFFD95D39),
@@ -36,6 +38,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       <String, SplayTreeMap<int, double?>>{};
   final Map<String, SplayTreeMap<int, double?>> _deferredLiveValuesByChannel =
       <String, SplayTreeMap<int, double?>>{};
+  final Map<String, ZoomPanBehavior> _zoomBehaviorsByChartId =
+      <String, ZoomPanBehavior>{};
   final ScrollController _chartsScrollController = ScrollController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final DateFormat _localTimeMinutesFormat = DateFormat('HH:mm');
@@ -68,6 +72,9 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
   int _lastServerNowUtcMs = 0;
   int _loadGeneration = 0;
   bool _isAxisLabelUpdateScheduled = false;
+  String? _activeMouseZoomChartId;
+  Offset? _mouseZoomStart;
+  Offset? _mouseZoomCurrent;
 
   @override
   void initState() {
@@ -127,8 +134,12 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _pendingShowSecondsOnXAxis = null;
       _pendingShowDateOnXAxis = null;
       _pendingShowDayOnlyOnXAxis = null;
+      _zoomBehaviorsByChartId.clear();
       _liveValuesByChannel.clear();
       _deferredLiveValuesByChannel.clear();
+      _activeMouseZoomChartId = null;
+      _mouseZoomStart = null;
+      _mouseZoomCurrent = null;
     });
 
     try {
@@ -338,6 +349,101 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return DateTime.fromMillisecondsSinceEpoch(value.round());
     }
     return null;
+  }
+
+  ZoomPanBehavior _zoomBehaviorForChart(String chartId) {
+    return _zoomBehaviorsByChartId.putIfAbsent(
+      chartId,
+      () => ZoomPanBehavior(
+        enablePinching: true,
+        enablePanning: true,
+        enableSelectionZooming: true,
+        enableMouseWheelZooming: true,
+        zoomMode: ZoomMode.xy,
+      ),
+    );
+  }
+
+  void _handleMouseZoomPointerDown(String chartId, PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse ||
+        (event.buttons & kSecondaryMouseButton) == 0) {
+      return;
+    }
+    _beginChartInteraction();
+    setState(() {
+      _activeMouseZoomChartId = chartId;
+      _mouseZoomStart = event.localPosition;
+      _mouseZoomCurrent = event.localPosition;
+    });
+  }
+
+  void _handleMouseZoomPointerMove(String chartId, PointerMoveEvent event) {
+    if (_activeMouseZoomChartId != chartId || _mouseZoomStart == null) {
+      return;
+    }
+    if (event.kind != PointerDeviceKind.mouse ||
+        (event.buttons & kSecondaryMouseButton) == 0) {
+      _finishMouseZoomSelection(chartId, applyZoom: false);
+      return;
+    }
+    setState(() {
+      _mouseZoomCurrent = event.localPosition;
+    });
+  }
+
+  void _handleMouseZoomPointerUp(String chartId, PointerUpEvent event) {
+    if (_activeMouseZoomChartId != chartId) {
+      return;
+    }
+    _finishMouseZoomSelection(chartId, endPosition: event.localPosition);
+  }
+
+  void _finishMouseZoomSelection(
+    String chartId, {
+    Offset? endPosition,
+    bool applyZoom = true,
+  }) {
+    if (_activeMouseZoomChartId != chartId) {
+      return;
+    }
+
+    final start = _mouseZoomStart;
+    final current = endPosition ?? _mouseZoomCurrent;
+    final selectionRect =
+        start != null && current != null ? Rect.fromPoints(start, current) : null;
+
+    setState(() {
+      _activeMouseZoomChartId = null;
+      _mouseZoomStart = null;
+      _mouseZoomCurrent = null;
+    });
+
+    if (applyZoom &&
+        selectionRect != null &&
+        selectionRect.width >= _desktopZoomSelectionMinExtent &&
+        selectionRect.height >= _desktopZoomSelectionMinExtent) {
+      _zoomBehaviorForChart(chartId).zoomByRect(selectionRect);
+    }
+
+    _endChartInteraction();
+  }
+
+  Rect? _mouseZoomSelectionRectForChart(String chartId) {
+    if (_activeMouseZoomChartId != chartId ||
+        _mouseZoomStart == null ||
+        _mouseZoomCurrent == null) {
+      return null;
+    }
+    return Rect.fromPoints(_mouseZoomStart!, _mouseZoomCurrent!);
+  }
+
+  void _resetChartZoom(String chartId) {
+    if (_activeMouseZoomChartId == chartId) {
+      _finishMouseZoomSelection(chartId, applyZoom: false);
+    }
+    _beginChartInteraction();
+    _zoomBehaviorForChart(chartId).reset();
+    _endChartInteraction();
   }
 
   @override
@@ -728,6 +834,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     if (_overlayCharts) {
       return <_ChartBundle>[
         _ChartBundle(
+          chartId: 'overlay:${request.channels.join('|')}',
           title: 'All selected channels',
           legendVisible: true,
           yAxisConfig: _buildYAxisConfig(request.channels, seriesByChannel),
@@ -740,6 +847,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       final channel = request.channels[index];
       final series = _lastHistorySeries(seriesByChannel[channel]);
       return _ChartBundle(
+        chartId: 'split:$channel',
         title: _displayNameForChannel(channel, series),
         legendVisible: false,
         yAxisConfig: _buildYAxisConfig(<String>[channel], seriesByChannel),
@@ -896,6 +1004,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     required int chartCount,
   }) {
     final theme = Theme.of(context);
+    final zoomBehavior = _zoomBehaviorForChart(chart.chartId);
+    final mouseZoomSelectionRect = _mouseZoomSelectionRectForChart(
+      chart.chartId,
+    );
     final titleStyle = theme.textTheme.titleSmall?.copyWith(
       fontSize: 13,
       fontWeight: FontWeight.w600,
@@ -928,46 +1040,80 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
               ),
               const SizedBox(height: 8),
               Expanded(
-                child: SfCartesianChart(
-                  legend: Legend(
-                    isVisible: chart.legendVisible,
-                    position: LegendPosition.bottom,
-                  ),
-                  plotAreaBorderWidth: 0,
-                  zoomPanBehavior: ZoomPanBehavior(
-                    enablePinching: true,
-                    enablePanning: true,
-                    enableMouseWheelZooming: true,
-                    zoomMode: ZoomMode.x,
-                  ),
-                  trackballBehavior: TrackballBehavior(
-                    enable: true,
-                    activationMode: ActivationMode.longPress,
-                    tooltipSettings: const InteractiveTooltip(
-                      enable: true,
-                      canShowMarker: false,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onDoubleTap: () => _resetChartZoom(chart.chartId),
+                  child: Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerDown: (PointerDownEvent event) =>
+                        _handleMouseZoomPointerDown(chart.chartId, event),
+                    onPointerMove: (PointerMoveEvent event) =>
+                        _handleMouseZoomPointerMove(chart.chartId, event),
+                    onPointerUp: (PointerUpEvent event) =>
+                        _handleMouseZoomPointerUp(chart.chartId, event),
+                    onPointerCancel: (_) => _finishMouseZoomSelection(
+                      chart.chartId,
+                      applyZoom: false,
+                    ),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: <Widget>[
+                        SfCartesianChart(
+                          legend: Legend(
+                            isVisible: chart.legendVisible,
+                            position: LegendPosition.bottom,
+                          ),
+                          plotAreaBorderWidth: 0,
+                          zoomPanBehavior: zoomBehavior,
+                          trackballBehavior: TrackballBehavior(
+                            enable: true,
+                            activationMode: ActivationMode.longPress,
+                            tooltipSettings: const InteractiveTooltip(
+                              enable: true,
+                              canShowMarker: false,
+                            ),
+                          ),
+                          onChartTouchInteractionDown: (_) =>
+                              _beginChartInteraction(),
+                          onChartTouchInteractionMove: (_) =>
+                              _beginChartInteraction(),
+                          onChartTouchInteractionUp: (_) =>
+                              _endChartInteraction(),
+                          onActualRangeChanged: _handleActualRangeChanged,
+                          onTrackballPositionChanging:
+                              _handleTrackballPositionChanging,
+                          primaryXAxis: DateTimeAxis(
+                            title: const AxisTitle(text: 'Local time'),
+                            dateFormat: _showSecondsOnXAxis
+                                ? _localTimeSecondsFormat
+                                : _showDayOnlyOnXAxis
+                                    ? _localTimeDayFormat
+                                    : _showDateOnXAxis
+                                        ? _localTimeDateFormat
+                                        : _localTimeMinutesFormat,
+                            edgeLabelPlacement: EdgeLabelPlacement.shift,
+                            labelIntersectAction:
+                                AxisLabelIntersectAction.rotate45,
+                            maximumLabels: 6,
+                          ),
+                          primaryYAxis: _buildYAxis(chart.yAxisConfig),
+                          series: chart.series,
+                        ),
+                        IgnorePointer(
+                          child: CustomPaint(
+                            painter: _MouseZoomSelectionPainter(
+                              selectionRect: mouseZoomSelectionRect,
+                              borderColor: theme.colorScheme.primary,
+                              fillColor: theme.colorScheme.primary.withValues(
+                                alpha: 0.14,
+                              ),
+                            ),
+                            child: const SizedBox.expand(),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  onChartTouchInteractionDown: (_) => _beginChartInteraction(),
-                  onChartTouchInteractionMove: (_) => _beginChartInteraction(),
-                  onChartTouchInteractionUp: (_) => _endChartInteraction(),
-                  onActualRangeChanged: _handleActualRangeChanged,
-                  onTrackballPositionChanging: _handleTrackballPositionChanging,
-                  primaryXAxis: DateTimeAxis(
-                    title: const AxisTitle(text: 'Local time'),
-                    dateFormat: _showSecondsOnXAxis
-                        ? _localTimeSecondsFormat
-                        : _showDayOnlyOnXAxis
-                            ? _localTimeDayFormat
-                            : _showDateOnXAxis
-                                ? _localTimeDateFormat
-                                : _localTimeMinutesFormat,
-                    edgeLabelPlacement: EdgeLabelPlacement.shift,
-                    labelIntersectAction: AxisLabelIntersectAction.rotate45,
-                    maximumLabels: 6,
-                  ),
-                  primaryYAxis: _buildYAxis(chart.yAxisConfig),
-                  series: chart.series,
                 ),
               ),
             ],
@@ -1712,12 +1858,14 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
 class _ChartBundle {
   const _ChartBundle({
+    required this.chartId,
     required this.title,
     required this.legendVisible,
     required this.yAxisConfig,
     required this.series,
   });
 
+  final String chartId;
   final String title;
   final bool legendVisible;
   final _YAxisConfig yAxisConfig;
@@ -1759,6 +1907,44 @@ class _DataRange {
     }
     minimum = math.min(minimum!, value);
     maximum = math.max(maximum!, value);
+  }
+}
+
+class _MouseZoomSelectionPainter extends CustomPainter {
+  const _MouseZoomSelectionPainter({
+    required this.selectionRect,
+    required this.borderColor,
+    required this.fillColor,
+  });
+
+  final Rect? selectionRect;
+  final Color borderColor;
+  final Color fillColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = selectionRect;
+    if (rect == null || rect.isEmpty) {
+      return;
+    }
+
+    final fillPaint = Paint()
+      ..color = fillColor
+      ..style = PaintingStyle.fill;
+    final borderPaint = Paint()
+      ..color = borderColor
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+
+    canvas.drawRect(rect, fillPaint);
+    canvas.drawRect(rect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(_MouseZoomSelectionPainter oldDelegate) {
+    return oldDelegate.selectionRect != selectionRect ||
+        oldDelegate.borderColor != borderColor ||
+        oldDelegate.fillColor != fillColor;
   }
 }
 

@@ -152,6 +152,55 @@ void main() {
       await tester.pump();
     },
   );
+
+  testWidgets('plot screen enables XY rectangle zoom on charts', (
+    WidgetTester tester,
+  ) async {
+    final repository = _FakePlotRepository(
+      Queue<Future<PlotQueryResponse>>.of(<Future<PlotQueryResponse>>[
+        Future<PlotQueryResponse>.value(_summaryHistoryResponse()),
+      ]),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          plotRepositoryProvider.overrideWithValue(repository),
+        ],
+        child: MaterialApp(
+          home: PlotScreen(
+            request: PlotViewRequest(
+              channels: const <String>['V1:TEST_CHANNEL'],
+              startLocal: DateTime(2026, 3, 12, 17, 0),
+              sourceLabel: '1 h',
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final chart = tester.widget<SfCartesianChart>(
+      find.byType(SfCartesianChart),
+    );
+    final zoomPanBehavior = chart.zoomPanBehavior;
+
+    expect(zoomPanBehavior, isNotNull);
+    expect(zoomPanBehavior!.enableSelectionZooming, isTrue);
+    expect(zoomPanBehavior.zoomMode, ZoomMode.xy);
+    expect(
+      find.ancestor(
+        of: find.byType(SfCartesianChart),
+        matching: find.byWidgetPredicate(
+          (Widget widget) => widget is GestureDetector && widget.onDoubleTap != null,
+        ),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
 }
 
 class _FakePlotRepository implements PlotRepository {

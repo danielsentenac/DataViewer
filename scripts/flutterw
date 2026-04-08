@@ -5,6 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export HOME="$ROOT_DIR/.home"
 export XDG_CONFIG_HOME="$ROOT_DIR/.home/.config"
 export PUB_CACHE="$ROOT_DIR/.pub-cache"
+export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$ROOT_DIR/.tooling/gradle}"
+
+if [[ -d "$ROOT_DIR/.tooling/android-sdk" ]]; then
+  export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ROOT_DIR/.tooling/android-sdk}"
+  export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+fi
 
 mkdir -p "$HOME/.config" "$PUB_CACHE"
 
