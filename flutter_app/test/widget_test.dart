@@ -103,6 +103,55 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });
+
+  testWidgets(
+    'plot screen keeps earlier bucketed history chunks when later chunks use a different bucket size',
+    (WidgetTester tester) async {
+      final repository = _FakePlotRepository(
+        Queue<Future<PlotQueryResponse>>.of(<Future<PlotQueryResponse>>[
+          Future<PlotQueryResponse>.value(_firstBucketedHistoryChunkResponse()),
+          Future<PlotQueryResponse>.value(_finalBucketedHistoryResponse()),
+        ]),
+        liveResponse: const LivePlotResponse(
+          serverNowUtcMs: 5000,
+          series: <LivePlotSeries>[],
+        ),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            plotRepositoryProvider.overrideWithValue(repository),
+          ],
+          child: MaterialApp(
+            home: PlotScreen(
+              request: PlotViewRequest(
+                channels: const <String>['V1:TEST_CHANNEL'],
+                startLocal: DateTime.now().subtract(const Duration(days: 2)),
+                sourceLabel: '2 d',
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.pump();
+      await tester.pump();
+
+      final chart = tester.widget<SfCartesianChart>(
+        find.byType(SfCartesianChart),
+      );
+      expect(chart.series.length, 2);
+      expect(
+        chart.series.whereType<HiloSeries<BucketPoint, DateTime>>().length,
+        2,
+      );
+      expect(find.textContaining('Loading history'), findsNothing);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
 }
 
 class _FakePlotRepository implements PlotRepository {
@@ -213,6 +262,65 @@ PlotQueryResponse _summaryHistoryResponse() {
     ],
     live: const LiveDirective(
       mode: 'deferred',
+      recommendedPollMs: 1000,
+      resumeAfterUtcMs: 5000,
+    ),
+  );
+}
+
+PlotQueryResponse _firstBucketedHistoryChunkResponse() {
+  return PlotQueryResponse(
+    query: const PlotQueryMeta(
+      channelCount: 1,
+      resolvedStartUtcMs: 1000,
+      resolvedStartGps: 1,
+      endUtcMs: 5000,
+      loadedEndUtcMs: 3000,
+      historyComplete: false,
+      nextChunkStartUtcMs: 3000,
+    ),
+    series: <PlotSeries>[
+      BucketedPlotSeries(
+        channel: 'V1:TEST_CHANNEL',
+        displayName: 'Test Channel',
+        unit: 'mbar',
+        startUtcMs: 1000,
+        bucketSeconds: 60,
+        minValues: const <double?>[1.0, 2.0],
+        maxValues: const <double?>[1.5, 2.5],
+      ),
+    ],
+    live: const LiveDirective(
+      mode: 'deferred',
+      recommendedPollMs: 1000,
+      resumeAfterUtcMs: 5000,
+    ),
+  );
+}
+
+PlotQueryResponse _finalBucketedHistoryResponse() {
+  return PlotQueryResponse(
+    query: const PlotQueryMeta(
+      channelCount: 1,
+      resolvedStartUtcMs: 1000,
+      resolvedStartGps: 1,
+      endUtcMs: 5000,
+      loadedEndUtcMs: 5000,
+      historyComplete: true,
+    ),
+    series: <PlotSeries>[
+      BucketedPlotSeries(
+        channel: 'V1:TEST_CHANNEL',
+        displayName: 'Test Channel',
+        unit: 'mbar',
+        startUtcMs: 3000,
+        bucketSeconds: 120,
+        minValues: const <double?>[3.0, 4.0],
+        maxValues: const <double?>[3.5, 4.5],
+      ),
+    ],
+    live: const LiveDirective(
+      mode: 'poll',
       recommendedPollMs: 1000,
       resumeAfterUtcMs: 5000,
     ),

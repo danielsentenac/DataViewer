@@ -723,9 +723,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return const <_ChartBundle>[];
     }
 
-    final seriesByChannel = <String, PlotSeries>{
-      for (final PlotSeries series in response.series) series.channel: series,
-    };
+    final seriesByChannel = _historySeriesByChannel(response);
 
     if (_overlayCharts) {
       return <_ChartBundle>[
@@ -740,7 +738,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
     return List<_ChartBundle>.generate(request.channels.length, (int index) {
       final channel = request.channels[index];
-      final series = seriesByChannel[channel];
+      final series = _lastHistorySeries(seriesByChannel[channel]);
       return _ChartBundle(
         title: _displayNameForChannel(channel, series),
         legendVisible: false,
@@ -759,55 +757,59 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       return const <CartesianSeries<dynamic, DateTime>>[];
     }
 
-    final seriesByChannel = <String, PlotSeries>{
-      for (final PlotSeries series in response.series) series.channel: series,
-    };
+    final seriesByChannel = _historySeriesByChannel(response);
     final chartSeries = <CartesianSeries<dynamic, DateTime>>[];
 
     for (int index = 0; index < channels.length; index++) {
       final channel = channels[index];
       final color = _palette[index % _palette.length];
-      final historySeries = seriesByChannel[channel];
-      final displayName = _displayNameForChannel(channel, historySeries);
+      final historySeries = seriesByChannel[channel] ?? const <PlotSeries>[];
+      final displayName = _displayNameForChannel(
+        channel,
+        _lastHistorySeries(historySeries),
+      );
       final liveSeries = _expandLivePoints(channel);
+      var hasVisibleHistoryLegend = false;
 
-      if (historySeries is RawPlotSeries) {
-        final points = _mergeRawHistoryAndLive(
-          historySeries.expandSamples(),
-          liveSeries,
-        );
-        chartSeries.add(
-          LineSeries<RawPoint, DateTime>(
-            dataSource: points,
-            animationDuration: 0,
-            xValueMapper: (RawPoint point, _) => point.localTimestamp,
-            yValueMapper: (RawPoint point, _) => point.value,
-            name: displayName,
-            color: color,
-            width: 1.6,
-          ),
-        );
-        continue;
-      }
+      for (final PlotSeries segment in historySeries) {
+        if (segment is RawPlotSeries) {
+          final points = _sanitizeLinePoints(segment.expandSamples());
+          chartSeries.add(
+            LineSeries<RawPoint, DateTime>(
+              dataSource: points,
+              animationDuration: 0,
+              xValueMapper: (RawPoint point, _) => point.localTimestamp,
+              yValueMapper: (RawPoint point, _) => point.value,
+              name: displayName,
+              isVisibleInLegend: !splitMode && !hasVisibleHistoryLegend,
+              color: color,
+              width: 1.6,
+            ),
+          );
+          hasVisibleHistoryLegend = true;
+          continue;
+        }
 
-      if (historySeries is BucketedPlotSeries) {
-        final bucketPoints =
-            _sanitizeBucketPoints(historySeries.expandBuckets());
-        chartSeries.add(
-          HiloSeries<BucketPoint, DateTime>(
-            dataSource: bucketPoints,
-            animationDuration: 0,
-            xValueMapper: (BucketPoint point, _) =>
-                DateTime.fromMillisecondsSinceEpoch(point.utcMs, isUtc: true)
-                    .toLocal(),
-            lowValueMapper: (BucketPoint point, _) => point.minValue,
-            highValueMapper: (BucketPoint point, _) => point.maxValue,
-            name: displayName,
-            color: color,
-            borderWidth: splitMode ? 1.2 : 1.4,
-            showIndicationForSameValues: true,
-          ),
-        );
+        if (segment is BucketedPlotSeries) {
+          final bucketPoints = _sanitizeBucketPoints(segment.expandBuckets());
+          chartSeries.add(
+            HiloSeries<BucketPoint, DateTime>(
+              dataSource: bucketPoints,
+              animationDuration: 0,
+              xValueMapper: (BucketPoint point, _) =>
+                  DateTime.fromMillisecondsSinceEpoch(point.utcMs, isUtc: true)
+                      .toLocal(),
+              lowValueMapper: (BucketPoint point, _) => point.minValue,
+              highValueMapper: (BucketPoint point, _) => point.maxValue,
+              name: displayName,
+              isVisibleInLegend: !splitMode && !hasVisibleHistoryLegend,
+              color: color,
+              borderWidth: splitMode ? 1.2 : 1.4,
+              showIndicationForSameValues: true,
+            ),
+          );
+          hasVisibleHistoryLegend = true;
+        }
       }
 
       if (liveSeries.isNotEmpty) {
@@ -818,6 +820,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             xValueMapper: (RawPoint point, _) => point.localTimestamp,
             yValueMapper: (RawPoint point, _) => point.value,
             name: splitMode ? 'Live' : '$displayName live',
+            isVisibleInLegend: !splitMode,
             color: color.withValues(alpha: 0.9),
             width: 1.2,
           ),
@@ -839,25 +842,20 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     return _sanitizeLinePoints(points);
   }
 
-  List<RawPoint> _mergeRawHistoryAndLive(
-    List<RawPoint> historyPoints,
-    List<RawPoint> livePoints,
+  List<RawPoint> _mergeRawPoints(
+    List<RawPoint> primaryPoints,
+    List<RawPoint> secondaryPoints,
   ) {
-    if (livePoints.isEmpty) {
-      return _sanitizeLinePoints(historyPoints);
-    }
     final merged = SplayTreeMap<int, double?>();
-    for (final RawPoint point in historyPoints) {
+    for (final RawPoint point in primaryPoints) {
       merged[point.utcMs] = point.value;
     }
-    for (final RawPoint point in livePoints) {
+    for (final RawPoint point in secondaryPoints) {
       merged[point.utcMs] = point.value;
     }
-    return _sanitizeLinePoints(
-      merged.entries.map((MapEntry<int, double?> entry) {
-        return RawPoint(utcMs: entry.key, value: entry.value);
-      }).toList(growable: false),
-    );
+    return merged.entries.map((MapEntry<int, double?> entry) {
+      return RawPoint(utcMs: entry.key, value: entry.value);
+    }).toList(growable: false);
   }
 
   List<RawPoint> _sanitizeLinePoints(List<RawPoint> points) {
@@ -1075,7 +1073,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }
 
     setState(() {
-      _mergeLiveSeries(_liveValuesByChannel, liveResponse.series);
+      _applyIncomingLiveSeries(
+        liveResponse.series,
+        targetBuffer: _liveValuesByChannel,
+      );
       _lastServerNowUtcMs = liveResponse.serverNowUtcMs;
       if (liveResponse.serverNowUtcMs > _lastLiveAfterUtcMs) {
         _lastLiveAfterUtcMs = liveResponse.serverNowUtcMs;
@@ -1109,7 +1110,10 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
     setState(() {
       if (hasDeferredValues) {
-        _mergeDeferredIntoLive();
+        _applyBufferedLiveValues(
+          _deferredLiveValuesByChannel,
+          targetBuffer: _liveValuesByChannel,
+        );
       }
       if (_deferredServerNowUtcMs != null) {
         _lastServerNowUtcMs = _deferredServerNowUtcMs!;
@@ -1125,17 +1129,6 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       }
       _clearDeferredLiveUpdate();
     });
-  }
-
-  void _mergeDeferredIntoLive() {
-    for (final MapEntry<String, SplayTreeMap<int, double?>> entry
-        in _deferredLiveValuesByChannel.entries) {
-      final buffer = _liveValuesByChannel.putIfAbsent(
-        entry.key,
-        () => SplayTreeMap<int, double?>(),
-      );
-      buffer.addAll(entry.value);
-    }
   }
 
   void _clearDeferredLiveUpdate() {
@@ -1173,6 +1166,80 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         buffer[point.utcMs] = point.value;
       }
     }
+  }
+
+  void _applyIncomingLiveSeries(
+    List<LivePlotSeries> seriesList, {
+    required Map<String, SplayTreeMap<int, double?>> targetBuffer,
+  }) {
+    final stagedByChannel = <String, SplayTreeMap<int, double?>>{};
+    _mergeLiveSeries(stagedByChannel, seriesList);
+    _applyBufferedLiveValues(stagedByChannel, targetBuffer: targetBuffer);
+  }
+
+  void _applyBufferedLiveValues(
+    Map<String, SplayTreeMap<int, double?>> incomingByChannel, {
+    required Map<String, SplayTreeMap<int, double?>> targetBuffer,
+  }) {
+    if (incomingByChannel.isEmpty) {
+      return;
+    }
+
+    final response = _response;
+    if (response == null) {
+      for (final MapEntry<String, SplayTreeMap<int, double?>> entry
+          in incomingByChannel.entries) {
+        final buffer = targetBuffer.putIfAbsent(
+          entry.key,
+          () => SplayTreeMap<int, double?>(),
+        );
+        buffer.addAll(entry.value);
+      }
+      return;
+    }
+
+    final mergedByChannel = <String, PlotSeries>{
+      for (final PlotSeries series in response.series) series.channel: series,
+    };
+    final order = <String>[
+      for (final PlotSeries series in response.series) series.channel,
+    ];
+    var didUpdateResponse = false;
+
+    for (final MapEntry<String, SplayTreeMap<int, double?>> entry
+        in incomingByChannel.entries) {
+      final existingSeries = mergedByChannel[entry.key];
+      if (existingSeries is RawPlotSeries) {
+        final mergedSeries = _mergeRawHistoryPointsIntoSeries(
+          existingSeries,
+          entry.value,
+        );
+        if (mergedSeries != null) {
+          mergedByChannel[entry.key] = mergedSeries;
+          targetBuffer.remove(entry.key);
+          didUpdateResponse = true;
+          continue;
+        }
+      }
+
+      final buffer = targetBuffer.putIfAbsent(
+        entry.key,
+        () => SplayTreeMap<int, double?>(),
+      );
+      buffer.addAll(entry.value);
+    }
+
+    if (!didUpdateResponse) {
+      return;
+    }
+
+    _response = PlotQueryResponse(
+      query: response.query,
+      series: order
+          .map((String channel) => mergedByChannel[channel]!)
+          .toList(growable: false),
+      live: response.live,
+    );
   }
 
   bool _isActiveLoad(int loadGeneration) {
@@ -1227,37 +1294,35 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     List<PlotSeries> accumulated,
     List<PlotSeries> incoming,
   ) {
-    final mergedByChannel = <String, PlotSeries>{
-      for (final PlotSeries series in accumulated) series.channel: series,
-    };
-    final order = <String>[
-      for (final PlotSeries series in accumulated) series.channel,
-    ];
+    final merged = List<PlotSeries>.of(accumulated, growable: true);
 
     for (final PlotSeries incomingSeries in incoming) {
-      final existingSeries = mergedByChannel[incomingSeries.channel];
-      if (existingSeries == null) {
-        mergedByChannel[incomingSeries.channel] = incomingSeries;
-        order.add(incomingSeries.channel);
+      final existingIndex = merged.lastIndexWhere(
+        (PlotSeries series) => series.channel == incomingSeries.channel,
+      );
+      if (existingIndex < 0) {
+        merged.add(incomingSeries);
         continue;
       }
+
+      final existingSeries = merged[existingIndex];
       if (existingSeries is RawPlotSeries && incomingSeries is RawPlotSeries) {
-        mergedByChannel[incomingSeries.channel] =
+        merged[existingIndex] =
             _mergeRawHistorySeries(existingSeries, incomingSeries);
         continue;
       }
       if (existingSeries is BucketedPlotSeries &&
-          incomingSeries is BucketedPlotSeries) {
-        mergedByChannel[incomingSeries.channel] =
+          incomingSeries is BucketedPlotSeries &&
+          existingSeries.bucketSeconds == incomingSeries.bucketSeconds) {
+        merged[existingIndex] =
             _mergeBucketedHistorySeries(existingSeries, incomingSeries);
         continue;
       }
-      mergedByChannel[incomingSeries.channel] = incomingSeries;
+
+      merged.add(incomingSeries);
     }
 
-    return order
-        .map((String channel) => mergedByChannel[channel]!)
-        .toList(growable: false);
+    return List<PlotSeries>.unmodifiable(merged);
   }
 
   RawPlotSeries _mergeRawHistorySeries(
@@ -1291,6 +1356,50 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       unit: incoming.unit,
       startUtcMs: startUtcMs,
       stepMs: incoming.stepMs,
+      values: values,
+    );
+  }
+
+  RawPlotSeries? _mergeRawHistoryPointsIntoSeries(
+    RawPlotSeries historySeries,
+    SplayTreeMap<int, double?> incomingValuesByUtcMs,
+  ) {
+    if (incomingValuesByUtcMs.isEmpty) {
+      return historySeries;
+    }
+    for (final int utcMs in incomingValuesByUtcMs.keys) {
+      if ((utcMs - historySeries.startUtcMs) % historySeries.stepMs != 0) {
+        return null;
+      }
+    }
+
+    final mergedPoints = _mergeRawPoints(
+      historySeries.expandSamples(),
+      incomingValuesByUtcMs.entries.map((MapEntry<int, double?> entry) {
+        return RawPoint(utcMs: entry.key, value: entry.value);
+      }).toList(growable: false),
+    );
+    if (mergedPoints.isEmpty) {
+      return historySeries;
+    }
+
+    final startUtcMs = mergedPoints.first.utcMs;
+    final endUtcMsExclusive = mergedPoints.last.utcMs + historySeries.stepMs;
+    final valuesByUtcMs = <int, double?>{
+      for (final RawPoint point in mergedPoints) point.utcMs: point.value,
+    };
+    final values = <double?>[];
+    for (int utcMs = startUtcMs;
+        utcMs < endUtcMsExclusive;
+        utcMs += historySeries.stepMs) {
+      values.add(valuesByUtcMs[utcMs]);
+    }
+    return RawPlotSeries(
+      channel: historySeries.channel,
+      displayName: historySeries.displayName,
+      unit: historySeries.unit,
+      startUtcMs: startUtcMs,
+      stepMs: historySeries.stepMs,
       values: values,
     );
   }
@@ -1348,19 +1457,39 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     return displayName.isEmpty ? channel : displayName;
   }
 
+  Map<String, List<PlotSeries>> _historySeriesByChannel(
+    PlotQueryResponse response,
+  ) {
+    final seriesByChannel = <String, List<PlotSeries>>{};
+    for (final PlotSeries series in response.series) {
+      seriesByChannel.putIfAbsent(series.channel, () => <PlotSeries>[]).add(
+            series,
+          );
+    }
+    return seriesByChannel;
+  }
+
+  PlotSeries? _lastHistorySeries(List<PlotSeries>? seriesList) {
+    if (seriesList == null || seriesList.isEmpty) {
+      return null;
+    }
+    return seriesList.last;
+  }
+
   List<String> _unitsForChannels(List<String> channels) {
     final response = _response;
     if (response == null) {
       return const <String>[];
     }
-    final seriesByChannel = <String, PlotSeries>{
-      for (final PlotSeries series in response.series) series.channel: series,
-    };
+    final seriesByChannel = _historySeriesByChannel(response);
     final units = SplayTreeSet<String>();
     for (final String channel in channels) {
-      final unit = seriesByChannel[channel]?.unit.trim() ?? '';
-      if (unit.isNotEmpty) {
-        units.add(unit);
+      for (final PlotSeries series
+          in seriesByChannel[channel] ?? const <PlotSeries>[]) {
+        final unit = series.unit.trim();
+        if (unit.isNotEmpty) {
+          units.add(unit);
+        }
       }
     }
     return units.toList(growable: false);
@@ -1368,13 +1497,16 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
   String _yAxisTitleForChannels(
     List<String> channels,
-    Map<String, PlotSeries> seriesByChannel,
+    Map<String, List<PlotSeries>> seriesByChannel,
   ) {
     final units = SplayTreeSet<String>();
     for (final String channel in channels) {
-      final unit = seriesByChannel[channel]?.unit.trim() ?? '';
-      if (unit.isNotEmpty) {
-        units.add(unit);
+      for (final PlotSeries series
+          in seriesByChannel[channel] ?? const <PlotSeries>[]) {
+        final unit = series.unit.trim();
+        if (unit.isNotEmpty) {
+          units.add(unit);
+        }
       }
     }
     if (units.isEmpty) {
@@ -1388,23 +1520,25 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
 
   _YAxisConfig _buildYAxisConfig(
     List<String> channels,
-    Map<String, PlotSeries> seriesByChannel,
+    Map<String, List<PlotSeries>> seriesByChannel,
   ) {
     final title = _yAxisTitleForChannels(channels, seriesByChannel);
     final range = _DataRange.empty();
 
     for (final String channel in channels) {
-      final PlotSeries? historySeries = seriesByChannel[channel];
-      if (historySeries is RawPlotSeries) {
-        for (final RawPoint point
-            in _sanitizeLinePoints(historySeries.expandSamples())) {
-          range.include(point.value);
-        }
-      } else if (historySeries is BucketedPlotSeries) {
-        for (final BucketPoint point
-            in _sanitizeBucketPoints(historySeries.expandBuckets())) {
-          range.include(point.minValue);
-          range.include(point.maxValue);
+      for (final PlotSeries historySeries
+          in seriesByChannel[channel] ?? const <PlotSeries>[]) {
+        if (historySeries is RawPlotSeries) {
+          for (final RawPoint point
+              in _sanitizeLinePoints(historySeries.expandSamples())) {
+            range.include(point.value);
+          }
+        } else if (historySeries is BucketedPlotSeries) {
+          for (final BucketPoint point
+              in _sanitizeBucketPoints(historySeries.expandBuckets())) {
+            range.include(point.minValue);
+            range.include(point.maxValue);
+          }
         }
       }
 
