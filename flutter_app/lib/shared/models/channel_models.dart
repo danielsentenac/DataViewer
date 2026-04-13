@@ -101,6 +101,18 @@ class SavedChannelCategory {
 
   int get count => channelNames.length;
 
+  SavedChannelCategory copyWith({
+    String? id,
+    String? label,
+    List<String>? channelNames,
+  }) {
+    return SavedChannelCategory(
+      id: id ?? this.id,
+      label: label ?? this.label,
+      channelNames: channelNames ?? this.channelNames,
+    );
+  }
+
   factory SavedChannelCategory.fromJson(Map<String, dynamic> json) {
     final channelNames = (json['channelNames'] as List<dynamic>? ??
             const <dynamic>[])

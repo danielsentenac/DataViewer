@@ -24,6 +24,10 @@ class PlotScreen extends ConsumerStatefulWidget {
 class _PlotScreenState extends ConsumerState<PlotScreen> {
   static const double _workspaceCompressOffset = 24;
   static const double _desktopZoomSelectionMinExtent = 12;
+  static const String _primaryTimeAxisName = 'plot_time_axis';
+  static const double _minimumTimeZoomFactor = 0.000001;
+  static const Duration _liveTailPreHandoffContext = Duration(minutes: 2);
+  static const Duration _liveTailMinimumWindow = Duration(minutes: 4);
   static const List<Color> _palette = <Color>[
     Color(0xFF0B6E75),
     Color(0xFFD95D39),
@@ -40,6 +44,8 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       <String, SplayTreeMap<int, double?>>{};
   final Map<String, ZoomPanBehavior> _zoomBehaviorsByChartId =
       <String, ZoomPanBehavior>{};
+  final Map<String, DateTimeAxisController> _timeAxisControllersByChartId =
+      <String, DateTimeAxisController>{};
   final ScrollController _chartsScrollController = ScrollController();
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final DateFormat _localTimeMinutesFormat = DateFormat('HH:mm');
@@ -135,6 +141,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
       _pendingShowDateOnXAxis = null;
       _pendingShowDayOnlyOnXAxis = null;
       _zoomBehaviorsByChartId.clear();
+      _timeAxisControllersByChartId.clear();
       _liveValuesByChannel.clear();
       _deferredLiveValuesByChannel.clear();
       _activeMouseZoomChartId = null;
@@ -287,11 +294,35 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     }
 
     final range = visibleMax.difference(visibleMin).abs();
+    _updateXAxisLabelModeForRange(range);
+  }
+
+  void _updateXAxisLabelModeForRange(
+    Duration range, {
+    bool immediate = false,
+  }) {
     final shouldShowSeconds = range <= const Duration(minutes: 10);
     final shouldShowDayOnly = range > const Duration(days: 3);
     final shouldShowDate =
         !shouldShowDayOnly && range > const Duration(hours: 20);
     if (!mounted) {
+      return;
+    }
+
+    if (immediate) {
+      _pendingShowSecondsOnXAxis = null;
+      _pendingShowDateOnXAxis = null;
+      _pendingShowDayOnlyOnXAxis = null;
+      if (shouldShowSeconds == _showSecondsOnXAxis &&
+          shouldShowDate == _showDateOnXAxis &&
+          shouldShowDayOnly == _showDayOnlyOnXAxis) {
+        return;
+      }
+      setState(() {
+        _showSecondsOnXAxis = shouldShowSeconds;
+        _showDateOnXAxis = shouldShowDate;
+        _showDayOnlyOnXAxis = shouldShowDayOnly;
+      });
       return;
     }
 
@@ -360,6 +391,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
         enableSelectionZooming: true,
         enableMouseWheelZooming: true,
         zoomMode: ZoomMode.xy,
+        maximumZoomLevel: _minimumTimeZoomFactor,
       ),
     );
   }
@@ -441,9 +473,124 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     if (_activeMouseZoomChartId == chartId) {
       _finishMouseZoomSelection(chartId, applyZoom: false);
     }
+    final response = _response;
+    if (response != null) {
+      final fullEndUtcMs = math.max(
+        math.max(response.query.loadedEndUtcMs, response.query.endUtcMs),
+        _lastServerNowUtcMs,
+      );
+      final fullRangeMs = math.max(1, fullEndUtcMs - response.query.resolvedStartUtcMs);
+      _updateXAxisLabelModeForRange(
+        Duration(milliseconds: fullRangeMs),
+        immediate: true,
+      );
+    }
     _beginChartInteraction();
     _zoomBehaviorForChart(chartId).reset();
     _endChartInteraction();
+  }
+
+  int? _liveHandoffUtcMs() {
+    final response = _response;
+    if (response == null) {
+      return null;
+    }
+    final handoffUtcMs = response.live.resumeAfterUtcMs;
+    return handoffUtcMs > 0 ? handoffUtcMs : null;
+  }
+
+  bool _hasLiveTailBeyondHistory() {
+    final handoffUtcMs = _liveHandoffUtcMs();
+    return handoffUtcMs != null && _lastServerNowUtcMs > handoffUtcMs;
+  }
+
+  void _jumpToLiveTail() {
+    final response = _response;
+    final handoffUtcMs = _liveHandoffUtcMs();
+    if (response == null ||
+        handoffUtcMs == null ||
+        !_hasLiveTailBeyondHistory()) {
+      return;
+    }
+
+    final fullStartUtcMs = response.query.resolvedStartUtcMs;
+    final fullEndUtcMs = math.max(
+      math.max(response.query.loadedEndUtcMs, response.query.endUtcMs),
+      _lastServerNowUtcMs,
+    );
+    final viewStartUtcMs = math.max(
+      fullStartUtcMs,
+      handoffUtcMs - _liveTailPreHandoffContext.inMilliseconds,
+    );
+    final minimumWindowEndUtcMs =
+        handoffUtcMs + _liveTailMinimumWindow.inMilliseconds;
+    final viewEndUtcMs = math.max(
+      math.min(fullEndUtcMs, minimumWindowEndUtcMs),
+      _lastServerNowUtcMs,
+    );
+    final totalSpanMs = fullEndUtcMs - fullStartUtcMs;
+    final visibleSpanMs = math.max(1, viewEndUtcMs - viewStartUtcMs);
+    if (totalSpanMs <= 0 || visibleSpanMs >= totalSpanMs) {
+      for (final String chartId in _zoomBehaviorsByChartId.keys) {
+        _resetChartZoom(chartId);
+      }
+      return;
+    }
+
+    final viewStart = DateTime.fromMillisecondsSinceEpoch(
+      viewStartUtcMs,
+      isUtc: true,
+    ).toLocal();
+    final viewEnd = DateTime.fromMillisecondsSinceEpoch(
+      viewEndUtcMs,
+      isUtc: true,
+    ).toLocal();
+    final zoomFactor =
+        (visibleSpanMs / totalSpanMs).clamp(_minimumTimeZoomFactor, 1.0).toDouble();
+    final zoomPosition = ((viewStartUtcMs - fullStartUtcMs) / totalSpanMs)
+        .clamp(0.0, 1.0 - zoomFactor)
+        .toDouble();
+    const timeAxis = DateTimeAxis(name: _primaryTimeAxisName);
+    _updateXAxisLabelModeForRange(
+      viewEnd.difference(viewStart).abs(),
+      immediate: true,
+    );
+
+    _beginChartInteraction();
+    if (_timeAxisControllersByChartId.isNotEmpty) {
+      for (final DateTimeAxisController controller
+          in _timeAxisControllersByChartId.values) {
+        controller
+          ..visibleMinimum = viewStart
+          ..visibleMaximum = viewEnd;
+      }
+    } else {
+      for (final ZoomPanBehavior behavior in _zoomBehaviorsByChartId.values) {
+        behavior.zoomToSingleAxis(timeAxis, zoomPosition, zoomFactor);
+      }
+    }
+    _endChartInteraction();
+  }
+
+  List<PlotBand> _buildLiveHandoffPlotBands(ThemeData theme) {
+    final handoffUtcMs = _liveHandoffUtcMs();
+    if (handoffUtcMs == null || !_hasLiveTailBeyondHistory()) {
+      return const <PlotBand>[];
+    }
+
+    final handoffTime =
+        DateTime.fromMillisecondsSinceEpoch(handoffUtcMs, isUtc: true).toLocal();
+    return <PlotBand>[
+      PlotBand(
+        start: handoffTime,
+        end: handoffTime,
+        color: Colors.transparent,
+        borderColor: theme.colorScheme.tertiary,
+        borderWidth: 1.5,
+        dashArray: const <double>[6, 4],
+        shouldRenderAboveSeries: true,
+      ),
+    ];
   }
 
   @override
@@ -549,6 +696,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     List<_ChartBundle> charts,
   ) {
     final response = _response;
+    final liveHandoffUtcMs = _liveHandoffUtcMs();
     final historyLoadedEnd = response == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(
@@ -567,11 +715,18 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
             _lastServerNowUtcMs,
             isUtc: true,
           ).toLocal();
+    final liveHandoff = liveHandoffUtcMs == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(
+            liveHandoffUtcMs,
+            isUtc: true,
+          ).toLocal();
     final historyProgress =
         response == null ? null : _historyProgress(response.query);
     final mixedUnits =
         _overlayCharts && _unitsForChannels(request.channels).length > 1;
     final isCompact = _isWorkspaceHeaderCompact && charts.isNotEmpty;
+    final canJumpToLiveTail = _hasLiveTailBeyondHistory();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -650,6 +805,14 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                               : 'Live to ${_formatDateTime(liveNow)}',
                           compact: true,
                         ),
+                      if (!isCompact && liveHandoff != null)
+                        _InfoChip(
+                          icon: Icons.vertical_align_center,
+                          label: canJumpToLiveTail
+                              ? 'Handoff ${_formatDateTime(liveHandoff)}'
+                              : 'Live handoff pending',
+                          compact: true,
+                        ),
                       if (mixedUnits)
                         const _InfoChip(
                           icon: Icons.straighten,
@@ -658,6 +821,27 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                         ),
                     ],
                   ),
+                  if (canJumpToLiveTail) ...<Widget>[
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: <Widget>[
+                        OutlinedButton.icon(
+                          onPressed: _jumpToLiveTail,
+                          icon: const Icon(Icons.my_location),
+                          label: const Text('Jump to live tail'),
+                        ),
+                        if (liveHandoff != null)
+                          Text(
+                            'Archive/live handoff: ${_formatDateTime(liveHandoff)}',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -1008,6 +1192,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
     final mouseZoomSelectionRect = _mouseZoomSelectionRectForChart(
       chart.chartId,
     );
+    final liveHandoffPlotBands = _buildLiveHandoffPlotBands(theme);
     final titleStyle = theme.textTheme.titleSmall?.copyWith(
       fontSize: 13,
       fontWeight: FontWeight.w600,
@@ -1083,6 +1268,13 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                           onTrackballPositionChanging:
                               _handleTrackballPositionChanging,
                           primaryXAxis: DateTimeAxis(
+                            name: _primaryTimeAxisName,
+                            onRendererCreated: (
+                              DateTimeAxisController controller,
+                            ) {
+                              _timeAxisControllersByChartId[chart.chartId] =
+                                  controller;
+                            },
                             title: const AxisTitle(text: 'Local time'),
                             dateFormat: _showSecondsOnXAxis
                                 ? _localTimeSecondsFormat
@@ -1095,6 +1287,7 @@ class _PlotScreenState extends ConsumerState<PlotScreen> {
                             labelIntersectAction:
                                 AxisLabelIntersectAction.rotate45,
                             maximumLabels: 6,
+                            plotBands: liveHandoffPlotBands,
                           ),
                           primaryYAxis: _buildYAxis(chart.yAxisConfig),
                           series: chart.series,

@@ -1,0 +1,51 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <filter id="waveGlow" x="-8%" y="-12%" width="116%" height="124%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="4.5" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="dotGlow" x="-120%" y="-120%" width="340%" height="340%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <linearGradient id="waveColor" x1="0" y1="256" x2="512" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD97A"/>
+      <stop offset="0.55" stop-color="#FFE293"/>
+      <stop offset="1" stop-color="#FFD875"/>
+    </linearGradient>
+    <radialGradient id="dotColor" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(246 208) rotate(45) scale(34)">
+      <stop offset="0" stop-color="#37BAFF"/>
+      <stop offset="1" stop-color="#1187E0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="28" fill="#121212"/>
+
+  <g filter="url(#waveGlow)">
+    <path
+      d="M-8 458
+         C 18 72, 46 72, 72 458
+         S 126 844, 152 458
+         S 206 72, 232 458
+         S 286 844, 312 458
+         S 366 72, 392 458
+         S 446 844, 472 458
+         S 526 72, 552 458"
+      stroke="url(#waveColor)"
+      stroke-width="11"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      fill="none"/>
+  </g>
+
+  <g filter="url(#dotGlow)">
+    <circle cx="246" cy="208" r="30" fill="url(#dotColor)"/>
+    <circle cx="236" cy="198" r="10" fill="#49C5FF" fill-opacity="0.38"/>
+  </g>
+</svg>

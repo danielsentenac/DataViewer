@@ -8,5 +8,13 @@ abstract class SavedChannelCategoryRepository {
     required List<String> channelNames,
   });
 
+  Future<SavedChannelCategory> updateCategory({
+    required String id,
+    required String label,
+    required List<String> channelNames,
+  });
+
+  Future<void> replaceCategories(List<SavedChannelCategory> categories);
+
   Future<void> deleteCategory(String id);
 }

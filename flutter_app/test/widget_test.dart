@@ -188,6 +188,7 @@ void main() {
     expect(zoomPanBehavior, isNotNull);
     expect(zoomPanBehavior!.enableSelectionZooming, isTrue);
     expect(zoomPanBehavior.zoomMode, ZoomMode.xy);
+    expect(zoomPanBehavior.maximumZoomLevel, lessThan(0.01));
     expect(
       find.ancestor(
         of: find.byType(SfCartesianChart),
@@ -196,6 +197,83 @@ void main() {
         ),
       ),
       findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
+  testWidgets('plot screen shows live-tail affordances on long history plots', (
+    WidgetTester tester,
+  ) async {
+    final repository = _FakePlotRepository(
+      Queue<Future<PlotQueryResponse>>.of(<Future<PlotQueryResponse>>[
+        Future<PlotQueryResponse>.value(_longRangeHistoryResponse()),
+      ]),
+      liveResponse: const LivePlotResponse(
+        serverNowUtcMs: 2592300000,
+        series: <LivePlotSeries>[
+          LivePlotSeries(
+            channel: 'V1:TEST_CHANNEL',
+            startUtcMs: 2592001000,
+            stepMs: 1000,
+            values: <double?>[3.0, 4.0, 5.0],
+          ),
+        ],
+      ),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          plotRepositoryProvider.overrideWithValue(repository),
+        ],
+        child: MaterialApp(
+          home: PlotScreen(
+            request: PlotViewRequest(
+              channels: const <String>['V1:TEST_CHANNEL'],
+              startLocal: DateTime(2026, 3, 12, 17, 0),
+              sourceLabel: '1 h',
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Jump to live tail'), findsOneWidget);
+    expect(find.textContaining('Archive/live handoff:'), findsOneWidget);
+
+    await tester.tap(find.text('Jump to live tail'));
+    await tester.pump();
+    await tester.pump();
+
+    final chart = tester.widget<SfCartesianChart>(
+      find.byType(SfCartesianChart),
+    );
+    final primaryXAxis = chart.primaryXAxis as DateTimeAxis;
+    expect(primaryXAxis.plotBands, isNotEmpty);
+    expect(primaryXAxis.dateFormat, isNotNull);
+    expect(
+      primaryXAxis.dateFormat!.format(DateTime(2026, 1, 1, 12, 34, 56)),
+      contains(':56'),
+    );
+
+    await tester.tap(find.byType(SfCartesianChart));
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.tap(find.byType(SfCartesianChart));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final resetChart = tester.widget<SfCartesianChart>(
+      find.byType(SfCartesianChart),
+    );
+    final resetXAxis = resetChart.primaryXAxis as DateTimeAxis;
+    expect(
+      resetXAxis.dateFormat!.format(DateTime(2026, 1, 1, 12, 34, 56)),
+      isNot(contains(':56')),
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
@@ -313,6 +391,34 @@ PlotQueryResponse _summaryHistoryResponse() {
       mode: 'deferred',
       recommendedPollMs: 1000,
       resumeAfterUtcMs: 5000,
+    ),
+  );
+}
+
+PlotQueryResponse _longRangeHistoryResponse() {
+  return PlotQueryResponse(
+    query: const PlotQueryMeta(
+      channelCount: 1,
+      resolvedStartUtcMs: 0,
+      resolvedStartGps: 0,
+      endUtcMs: 2592000000,
+      loadedEndUtcMs: 2592000000,
+      historyComplete: true,
+    ),
+    series: <PlotSeries>[
+      RawPlotSeries(
+        channel: 'V1:TEST_CHANNEL',
+        displayName: 'Test Channel',
+        unit: 'mbar',
+        startUtcMs: 0,
+        stepMs: 2592000000,
+        values: const <double?>[1.0, 2.0],
+      ),
+    ],
+    live: const LiveDirective(
+      mode: 'deferred',
+      recommendedPollMs: 1000,
+      resumeAfterUtcMs: 2592000000,
     ),
   );
 }

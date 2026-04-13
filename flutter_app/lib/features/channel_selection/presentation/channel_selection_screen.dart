@@ -45,6 +45,7 @@ class _ChannelSelectionScreenState
   String? _error;
   String? _selectedCategory;
   String? _selectedSavedCategoryId;
+  String? _selectionSourceSavedCategoryId;
   String _selectedPreset = '1 h';
   int _categoryLoadAttempts = 0;
   Timer? _categoryRetryTimer;
@@ -155,9 +156,16 @@ class _ChannelSelectionScreenState
       )
           ? nextSelectedId
           : null;
+      final resolvedSourceId = categories.any(
+        (SavedChannelCategory category) =>
+            category.id == _selectionSourceSavedCategoryId,
+      )
+          ? _selectionSourceSavedCategoryId
+          : null;
       setState(() {
         _savedCategories = categories;
         _selectedSavedCategoryId = resolvedSelectedId;
+        _selectionSourceSavedCategoryId = resolvedSourceId;
       });
     } finally {
       if (mounted) {
@@ -277,7 +285,7 @@ class _ChannelSelectionScreenState
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: const Text('Reset plots?'),
+          title: const Text('Reset selection?'),
           content: Text(
             'Clear the current ${_selectedChannels.length}-channel selection?',
           ),
@@ -301,8 +309,9 @@ class _ChannelSelectionScreenState
     setState(() {
       _selectedChannels.clear();
       _isSelectionHeaderCompact = false;
+      _selectionSourceSavedCategoryId = null;
     });
-    _showMessage('Plot selection cleared.');
+    _showMessage('Channel selection cleared.');
   }
 
   void _openFiltersPanel() {
@@ -323,13 +332,13 @@ class _ChannelSelectionScreenState
         context: context,
         builder: (BuildContext context) {
           return AlertDialog(
-            title: const Text('Save as category'),
+            title: const Text('Save selection as config'),
             content: TextField(
               controller: controller,
               autofocus: true,
               textInputAction: TextInputAction.done,
               decoration: const InputDecoration(
-                labelText: 'Category name',
+                labelText: 'Config name',
                 hintText: 'Example: Lock acquisition',
               ),
               onSubmitted: (String value) {
@@ -370,6 +379,7 @@ class _ChannelSelectionScreenState
         label: label,
         channelNames: channelNames,
       );
+      final backupSuffix = await _backupSyncMessageSuffix();
       if (!mounted) {
         return;
       }
@@ -378,7 +388,169 @@ class _ChannelSelectionScreenState
       if (!mounted) {
         return;
       }
-      _showMessage('Saved "${category.label}" (${category.count} channels).');
+      setState(() {
+        _selectionSourceSavedCategoryId = category.id;
+      });
+      _showMessage(
+        'Saved config "${category.label}" (${category.count} channels).$backupSuffix',
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage(_normalizeErrorMessage(error));
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Future<void> _editSavedCategory() async {
+    final category = _selectedSavedCategory;
+    if (category == null) {
+      return;
+    }
+
+    final currentSelection = _selectedChannels.toList()..sort();
+    final canUseCurrentSelection = currentSelection.isNotEmpty;
+    final defaultUseCurrentSelection = canUseCurrentSelection &&
+        (_selectionSourceSavedCategoryId == category.id ||
+            _hasSameChannelSelection(category.channelNames));
+    final controller = TextEditingController(text: category.label);
+    var useCurrentSelection = defaultUseCurrentSelection;
+
+    try {
+      final editRequest = await showDialog<_SavedCategoryEditRequest>(
+        context: context,
+        builder: (BuildContext context) {
+          final dialogTheme = Theme.of(context);
+          return StatefulBuilder(
+            builder: (BuildContext context, StateSetter setDialogState) {
+              return AlertDialog(
+                title: const Text('Edit saved config'),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      TextField(
+                        controller: controller,
+                        autofocus: true,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(
+                          labelText: 'Config name',
+                        ),
+                        onSubmitted: (String value) {
+                          final normalizedValue = value.trim();
+                          if (normalizedValue.isEmpty) {
+                            return;
+                          }
+                          Navigator.of(context).pop(
+                            _SavedCategoryEditRequest(
+                              label: normalizedValue,
+                              useCurrentSelection: useCurrentSelection,
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Channels',
+                        style: dialogTheme.textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 8),
+                      SegmentedButton<bool>(
+                        segments: <ButtonSegment<bool>>[
+                          ButtonSegment<bool>(
+                            value: false,
+                            label: Text('Keep saved (${category.count})'),
+                          ),
+                          ButtonSegment<bool>(
+                            value: true,
+                            label: Text(
+                              canUseCurrentSelection
+                                  ? 'Use current (${currentSelection.length})'
+                                  : 'Use current',
+                            ),
+                            enabled: canUseCurrentSelection,
+                          ),
+                        ],
+                        selected: <bool>{useCurrentSelection},
+                        multiSelectionEnabled: false,
+                        onSelectionChanged: (Set<bool> selection) {
+                          if (selection.isEmpty) {
+                            return;
+                          }
+                          setDialogState(() {
+                            useCurrentSelection = selection.first;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        canUseCurrentSelection
+                            ? 'Use the channels currently selected on the main screen to replace the saved channel list.'
+                            : 'Select at least one channel to replace the saved channel list. You can still rename this config now.',
+                        style: dialogTheme.textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                actions: <Widget>[
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Cancel'),
+                  ),
+                  FilledButton(
+                    onPressed: () {
+                      final normalizedValue = controller.text.trim();
+                      if (normalizedValue.isEmpty) {
+                        return;
+                      }
+                      Navigator.of(context).pop(
+                        _SavedCategoryEditRequest(
+                          label: normalizedValue,
+                          useCurrentSelection: useCurrentSelection,
+                        ),
+                      );
+                    },
+                    child: const Text('Update'),
+                  ),
+                ],
+              );
+            },
+          );
+        },
+      );
+
+      if (!mounted || editRequest == null) {
+        return;
+      }
+
+      final repository = ref.read(savedChannelCategoryRepositoryProvider);
+      final updatedCategory = await repository.updateCategory(
+        id: category.id,
+        label: editRequest.label,
+        channelNames: editRequest.useCurrentSelection
+            ? currentSelection
+            : category.channelNames,
+      );
+      final backupSuffix = await _backupSyncMessageSuffix();
+      if (!mounted) {
+        return;
+      }
+
+      await _loadSavedCategories(selectedCategoryId: updatedCategory.id);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        if (editRequest.useCurrentSelection) {
+          _selectionSourceSavedCategoryId = updatedCategory.id;
+        }
+      });
+      _showMessage(
+        'Updated config "${updatedCategory.label}" (${updatedCategory.count} channels).$backupSuffix',
+      );
     } catch (error) {
       if (!mounted) {
         return;
@@ -428,8 +600,10 @@ class _ChannelSelectionScreenState
       _selectedChannels
         ..clear()
         ..addAll(category.channelNames);
+      _selectionSourceSavedCategoryId = category.id;
     });
-    _showMessage('Loaded "${category.label}" (${category.count} channels).');
+    _showMessage(
+        'Loaded config "${category.label}" (${category.count} channels).');
   }
 
   Future<void> _deleteSavedCategory() async {
@@ -442,9 +616,9 @@ class _ChannelSelectionScreenState
       context: context,
       builder: (BuildContext context) {
         return AlertDialog(
-          title: const Text('Delete saved category?'),
+          title: const Text('Delete saved config?'),
           content: Text(
-            'Delete "${category.label}" from the saved categories list?',
+            'Delete "${category.label}" from the saved configs list?',
           ),
           actions: <Widget>[
             TextButton(
@@ -465,14 +639,125 @@ class _ChannelSelectionScreenState
 
     final repository = ref.read(savedChannelCategoryRepositoryProvider);
     await repository.deleteCategory(category.id);
+    final backupSuffix = await _backupSyncMessageSuffix();
     if (!mounted) {
       return;
+    }
+    if (_selectionSourceSavedCategoryId == category.id) {
+      setState(() {
+        _selectionSourceSavedCategoryId = null;
+      });
     }
     await _loadSavedCategories();
     if (!mounted) {
       return;
     }
-    _showMessage('Deleted "${category.label}".');
+    _showMessage('Deleted config "${category.label}".$backupSuffix');
+  }
+
+  Future<void> _exportSavedConfigsBackup() async {
+    try {
+      final backupService = ref.read(savedChannelCategoryBackupServiceProvider);
+      final hadConfiguredAutoBackup =
+          backupService.hasConfiguredAutoBackupTarget;
+      final savedPath = await backupService.exportBackup();
+      if (!mounted || savedPath == null) {
+        return;
+      }
+      setState(() {});
+      final hasConfiguredAutoBackup =
+          backupService.hasConfiguredAutoBackupTarget;
+      if (!hadConfiguredAutoBackup && hasConfiguredAutoBackup) {
+        _showMessage(
+          'Backup folder configured. Saved configs will now keep this phone-storage backup updated automatically.',
+        );
+        return;
+      }
+      _showMessage('Backup synced to phone storage.');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+      _showMessage(_normalizeErrorMessage(error));
+    }
+  }
+
+  Future<void> _importSavedConfigsBackup() async {
+    if (_savedCategories.isNotEmpty) {
+      final shouldReplace = await showDialog<bool>(
+        context: context,
+        builder: (BuildContext context) {
+          return AlertDialog(
+            title: const Text('Replace saved configs?'),
+            content: Text(
+              'Importing a backup will replace the current ${_savedCategories.length} saved configs.',
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Replace'),
+              ),
+            ],
+          );
+        },
+      );
+      if (!mounted || shouldReplace != true) {
+        return;
+      }
+    }
+
+    try {
+      final backupService = ref.read(savedChannelCategoryBackupServiceProvider);
+      final importResult = await backupService.importBackup();
+      if (!mounted || importResult == null) {
+        return;
+      }
+
+      await _loadSavedCategories();
+      if (!mounted) {
+        return;
+      }
+      _showMessage(
+        'Imported ${importResult.categoryCount} saved configs from backup.${_autoBackupConfiguredSuffix()}',
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      _showMessage(_normalizeErrorMessage(error));
+    }
+  }
+
+  Future<String> _backupSyncMessageSuffix() async {
+    final backupService = ref.read(savedChannelCategoryBackupServiceProvider);
+    if (!backupService.hasConfiguredAutoBackupTarget) {
+      return '';
+    }
+
+    try {
+      final savedPath = await backupService.syncConfiguredBackup();
+      if (savedPath == null) {
+        return '';
+      }
+      return ' Backup updated.';
+    } catch (error) {
+      if (mounted) {
+        setState(() {});
+      }
+      return ' Local changes were kept, but backup update failed: ${_normalizeErrorMessage(error)}';
+    }
+  }
+
+  String _autoBackupConfiguredSuffix() {
+    final backupService = ref.read(savedChannelCategoryBackupServiceProvider);
+    return backupService.hasConfiguredAutoBackupTarget
+        ? ' Backup updated.'
+        : '';
   }
 
   void _selectAllVisibleChannels() {
@@ -743,132 +1028,146 @@ class _ChannelSelectionScreenState
     bool showDrawerHeading = false,
   }) {
     final isCompact = _isFiltersHeaderCompact && _results.isNotEmpty;
+    final filtersHeader = AnimatedSize(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            'Filters',
+            style: theme.textTheme.titleLarge,
+          ),
+          if (!isCompact) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              'Search channels, choose the subsystem and start time, then tick the channels to add them to the main selection.',
+              style: theme.textTheme.bodyMedium,
+            ),
+          ],
+          SizedBox(height: isCompact ? 12 : 16),
+          _buildFilterSearchRow(),
+          const SizedBox(height: 12),
+          _buildCategoryDropdown(),
+          if (isCompact) ...<Widget>[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                _summaryChip(
+                  theme,
+                  _selectedPreset == 'Custom'
+                      ? 'Start ${_compactStartLabel(startLocal)}'
+                      : 'Start $_selectedPreset ago',
+                ),
+                _summaryChip(
+                  theme,
+                  _selectedCategory == null
+                      ? 'All categories'
+                      : _selectedCategory!,
+                ),
+                _summaryChip(
+                  theme,
+                  '${_selectedChannels.length} selected',
+                ),
+              ],
+            ),
+          ] else ...<Widget>[
+            const SizedBox(height: 16),
+            _buildSavedCategoriesSection(theme),
+            const SizedBox(height: 16),
+            _buildStartTimeSection(theme, startLocal),
+          ],
+        ],
+      ),
+    );
+    final availableChannelsSection = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                'Available channels',
+                style: theme.textTheme.titleMedium,
+              ),
+            ),
+            TextButton(
+              onPressed: _results.isEmpty ? null : _selectAllVisibleChannels,
+              child: const Text('Select all'),
+            ),
+            TextButton(
+              onPressed: _visibleSelectedChannelCount == 0
+                  ? null
+                  : _unselectAllVisibleChannels,
+              child: const Text('Unselect all'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: Card(
+            clipBehavior: Clip.antiAlias,
+            margin: EdgeInsets.zero,
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _results.isEmpty
+                    ? Center(
+                        child: Text(
+                          'No channels matched this search.',
+                          style: theme.textTheme.titleMedium,
+                        ),
+                      )
+                    : ListView.separated(
+                        controller: _availableChannelsScrollController,
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        itemCount: _results.length,
+                        separatorBuilder: (BuildContext context, int index) {
+                          return const Divider(height: 1);
+                        },
+                        itemBuilder: (BuildContext context, int index) {
+                          final channel = _results[index];
+                          final isSelected = _selectedChannels.contains(
+                            channel.name,
+                          );
+                          return CheckboxListTile(
+                            value: isSelected,
+                            onChanged: (bool? value) {
+                              setState(() {
+                                if (value ?? false) {
+                                  _selectedChannels.add(channel.name);
+                                } else {
+                                  _selectedChannels.remove(channel.name);
+                                }
+                              });
+                            },
+                            title: Text(channel.name),
+                            subtitle: Text(_channelSubtitle(channel)),
+                            dense: true,
+                            controlAffinity: ListTileControlAffinity.leading,
+                          );
+                        },
+                      ),
+          ),
+        ),
+      ],
+    );
     final content = Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          AnimatedSize(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  'Filters',
-                  style: theme.textTheme.titleLarge,
-                ),
-                if (!isCompact) ...<Widget>[
-                  const SizedBox(height: 8),
-                  Text(
-                    'Search channels, choose the subsystem and start time, then tick the channels to add them to the main selection.',
-                    style: theme.textTheme.bodyMedium,
-                  ),
-                ],
-                SizedBox(height: isCompact ? 12 : 16),
-                _buildFilterSearchRow(),
-                const SizedBox(height: 12),
-                _buildCategoryDropdown(),
-                if (isCompact) ...<Widget>[
-                  const SizedBox(height: 12),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: <Widget>[
-                      _summaryChip(
-                        theme,
-                        _selectedPreset == 'Custom'
-                            ? 'Start ${_compactStartLabel(startLocal)}'
-                            : 'Start $_selectedPreset ago',
-                      ),
-                      _summaryChip(
-                        theme,
-                        _selectedCategory == null
-                            ? 'All categories'
-                            : _selectedCategory!,
-                      ),
-                      _summaryChip(
-                        theme,
-                        '${_selectedChannels.length} selected',
-                      ),
-                    ],
-                  ),
-                ] else ...<Widget>[
-                  const SizedBox(height: 16),
-                  _buildSavedCategoriesSection(theme),
-                  const SizedBox(height: 16),
-                  _buildStartTimeSection(theme, startLocal),
-                ],
-              ],
+          Flexible(
+            fit: FlexFit.loose,
+            child: SingleChildScrollView(
+              primary: false,
+              child: filtersHeader,
             ),
           ),
           SizedBox(height: isCompact ? 12 : 16),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: Text(
-                  'Available channels',
-                  style: theme.textTheme.titleMedium,
-                ),
-              ),
-              TextButton(
-                onPressed: _results.isEmpty ? null : _selectAllVisibleChannels,
-                child: const Text('Select all'),
-              ),
-              TextButton(
-                onPressed: _visibleSelectedChannelCount == 0
-                    ? null
-                    : _unselectAllVisibleChannels,
-                child: const Text('Unselect all'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
           Expanded(
-            flex: 6,
-            child: Card(
-              clipBehavior: Clip.antiAlias,
-              margin: EdgeInsets.zero,
-              child: _isLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : _results.isEmpty
-                      ? Center(
-                          child: Text(
-                            'No channels matched this search.',
-                            style: theme.textTheme.titleMedium,
-                          ),
-                        )
-                      : ListView.separated(
-                          controller: _availableChannelsScrollController,
-                          padding: const EdgeInsets.symmetric(vertical: 8),
-                          itemCount: _results.length,
-                          separatorBuilder: (BuildContext context, int index) {
-                            return const Divider(height: 1);
-                          },
-                          itemBuilder: (BuildContext context, int index) {
-                            final channel = _results[index];
-                            final isSelected = _selectedChannels.contains(
-                              channel.name,
-                            );
-                            return CheckboxListTile(
-                              value: isSelected,
-                              onChanged: (bool? value) {
-                                setState(() {
-                                  if (value ?? false) {
-                                    _selectedChannels.add(channel.name);
-                                  } else {
-                                    _selectedChannels.remove(channel.name);
-                                  }
-                                });
-                              },
-                              title: Text(channel.name),
-                              subtitle: Text(_channelSubtitle(channel)),
-                              dense: true,
-                              controlAffinity: ListTileControlAffinity.leading,
-                            );
-                          },
-                        ),
-            ),
+            child: availableChannelsSection,
           ),
         ],
       ),
@@ -937,6 +1236,13 @@ class _ChannelSelectionScreenState
   }
 
   Widget _buildSavedCategoriesSection(ThemeData theme) {
+    final backupService = ref.read(savedChannelCategoryBackupServiceProvider);
+    final hasConfiguredAutoBackup = backupService.hasConfiguredAutoBackupTarget;
+    const compactActionStyle = ButtonStyle(
+      visualDensity: VisualDensity.compact,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
@@ -950,13 +1256,13 @@ class _ChannelSelectionScreenState
                 isExpanded: true,
                 decoration: InputDecoration(
                   labelText: _isLoadingSavedCategories
-                      ? 'Loading saved categories'
-                      : 'Saved categories',
+                      ? 'Loading saved configs'
+                      : 'Saved configs',
                 ),
                 items: <DropdownMenuItem<String>>[
                   const DropdownMenuItem<String>(
                     value: null,
-                    child: Text('Select a saved category'),
+                    child: Text('Select a saved config'),
                   ),
                   ..._savedCategories.map((SavedChannelCategory category) {
                     return DropdownMenuItem<String>(
@@ -977,9 +1283,49 @@ class _ChannelSelectionScreenState
             const SizedBox(width: 8),
             IconButton.filledTonal(
               onPressed:
+                  _selectedSavedCategory == null ? null : _editSavedCategory,
+              tooltip: 'Edit saved config',
+              icon: const Icon(Icons.edit_outlined),
+            ),
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              onPressed:
                   _selectedSavedCategory == null ? null : _deleteSavedCategory,
-              tooltip: 'Delete saved category',
+              tooltip: 'Delete saved config',
               icon: const Icon(Icons.delete_outline),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: FilledButton.tonal(
+                onPressed: _selectedChannels.isEmpty
+                    ? null
+                    : _saveCurrentSelectionAsCategory,
+                style: compactActionStyle,
+                child: const Text('Save'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _selectedSavedCategory == null
+                    ? null
+                    : _loadSavedCategorySelection,
+                style: compactActionStyle,
+                child: const Text('Load'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton(
+                onPressed:
+                    _selectedSavedCategory == null ? null : _editSavedCategory,
+                style: compactActionStyle,
+                child: const Text('Update'),
+              ),
             ),
           ],
         ),
@@ -988,30 +1334,44 @@ class _ChannelSelectionScreenState
           spacing: 8,
           runSpacing: 8,
           children: <Widget>[
-            FilledButton.tonalIcon(
-              onPressed: _selectedChannels.isEmpty
-                  ? null
-                  : _saveCurrentSelectionAsCategory,
-              icon: const Icon(Icons.bookmark_add_outlined),
-              label: const Text('Save selection'),
+            OutlinedButton.icon(
+              onPressed: _exportSavedConfigsBackup,
+              icon: const Icon(Icons.upload_file_outlined),
+              label:
+                  Text(hasConfiguredAutoBackup ? 'Sync backup' : 'Set backup'),
             ),
             OutlinedButton.icon(
-              onPressed: _selectedSavedCategory == null
-                  ? null
-                  : _loadSavedCategorySelection,
-              icon: const Icon(Icons.download_outlined),
-              label: const Text('Load saved'),
+              onPressed: _importSavedConfigsBackup,
+              icon: const Icon(Icons.download_for_offline_outlined),
+              label: const Text('Import backup'),
             ),
           ],
         ),
+        if (_selectedSavedCategory != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(
+              _savedConfigHint(_selectedSavedCategory!),
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
         if (_savedCategories.isEmpty && !_isLoadingSavedCategories)
           Padding(
             padding: const EdgeInsets.only(top: 12),
             child: Text(
-              'Save the current channel selection as a named category to reuse it later.',
+              'Save the current channel selection as a named config to reuse it later. Load it, add or remove channels in the main selection, then use Update config to save the changes.',
               style: theme.textTheme.bodySmall,
             ),
           ),
+        Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Text(
+            hasConfiguredAutoBackup
+                ? 'The backup file in phone storage is updated automatically whenever you save, update, delete, or import configs.'
+                : 'Choose Set backup once to save configs into phone storage. After that, config changes keep dataviewer-saved-configs.json updated automatically and you can Import backup after reinstall.',
+            style: theme.textTheme.bodySmall,
+          ),
+        ),
       ],
     );
   }
@@ -1097,6 +1457,13 @@ class _ChannelSelectionScreenState
         _selectedChannels.containsAll(channelNames);
   }
 
+  String _savedConfigHint(SavedChannelCategory category) {
+    if (_selectionSourceSavedCategoryId == category.id) {
+      return 'The current selection is based on this config. Add or remove channels, then use Update config to save the edited channel list or rename it.';
+    }
+    return 'Load this config to edit its channels with the current selection, or open Update config to rename it without changing the saved channel list.';
+  }
+
   void _showMessage(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message)),
@@ -1168,4 +1535,14 @@ class _ChannelSelectionScreenState
         '${local.hour.toString().padLeft(2, '0')}:'
         '${local.minute.toString().padLeft(2, '0')}';
   }
+}
+
+class _SavedCategoryEditRequest {
+  const _SavedCategoryEditRequest({
+    required this.label,
+    required this.useCurrentSelection,
+  });
+
+  final String label;
+  final bool useCurrentSelection;
 }

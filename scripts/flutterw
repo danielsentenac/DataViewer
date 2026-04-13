@@ -6,6 +6,7 @@ export HOME="$ROOT_DIR/.home"
 export XDG_CONFIG_HOME="$ROOT_DIR/.home/.config"
 export PUB_CACHE="$ROOT_DIR/.pub-cache"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$ROOT_DIR/.tooling/gradle}"
+TOOLCHAIN_SHIM_DIR="$ROOT_DIR/.tooling/native-toolchain/bin"
 
 if [[ -d "$ROOT_DIR/.tooling/android-sdk" ]]; then
   export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ROOT_DIR/.tooling/android-sdk}"
@@ -13,5 +14,37 @@ if [[ -d "$ROOT_DIR/.tooling/android-sdk" ]]; then
 fi
 
 mkdir -p "$HOME/.config" "$PUB_CACHE"
+
+if [[ -x /usr/bin/cc && -x /usr/bin/c++ && -x /usr/bin/ld ]]; then
+  mkdir -p "$TOOLCHAIN_SHIM_DIR"
+  cat >"$TOOLCHAIN_SHIM_DIR/clang" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/cc "$@"
+EOF
+  cat >"$TOOLCHAIN_SHIM_DIR/clang++" <<'EOF'
+#!/usr/bin/env bash
+exec /usr/bin/c++ "$@"
+EOF
+  chmod 755 "$TOOLCHAIN_SHIM_DIR/clang" "$TOOLCHAIN_SHIM_DIR/clang++"
+  ln -sf /usr/bin/ld "$TOOLCHAIN_SHIM_DIR/ld"
+  ln -sf /usr/bin/ld "$TOOLCHAIN_SHIM_DIR/ld.lld"
+  if [[ -x /usr/bin/ar ]]; then
+    ln -sf /usr/bin/ar "$TOOLCHAIN_SHIM_DIR/ar"
+    ln -sf /usr/bin/ar "$TOOLCHAIN_SHIM_DIR/llvm-ar"
+  fi
+  if [[ -x /usr/bin/ranlib ]]; then
+    ln -sf /usr/bin/ranlib "$TOOLCHAIN_SHIM_DIR/ranlib"
+    ln -sf /usr/bin/ranlib "$TOOLCHAIN_SHIM_DIR/llvm-ranlib"
+  fi
+  if [[ -x /usr/bin/nm ]]; then
+    ln -sf /usr/bin/nm "$TOOLCHAIN_SHIM_DIR/nm"
+    ln -sf /usr/bin/nm "$TOOLCHAIN_SHIM_DIR/llvm-nm"
+  fi
+  if [[ -x /usr/bin/strip ]]; then
+    ln -sf /usr/bin/strip "$TOOLCHAIN_SHIM_DIR/strip"
+    ln -sf /usr/bin/strip "$TOOLCHAIN_SHIM_DIR/llvm-strip"
+  fi
+  export PATH="$TOOLCHAIN_SHIM_DIR:$PATH"
+fi
 
 exec "$ROOT_DIR/.tooling/flutter/bin/flutter" "$@"
